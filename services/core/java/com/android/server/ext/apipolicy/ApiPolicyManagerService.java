@@ -148,6 +148,7 @@ public final class ApiPolicyManagerService extends SystemService {
 
     @Override
     public void onStart() {
+        LocationPolicyHooks.registerHookPoints(mLocalService);
         loadPersistedScripts();
         publishLocalService(ApiPolicyInternal.class, mLocalService);
         publishBinderService(SERVICE_NAME, mBinderService);

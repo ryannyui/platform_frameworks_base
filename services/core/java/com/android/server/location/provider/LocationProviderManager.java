@@ -948,6 +948,12 @@ public class LocationProviderManager extends
                 return null;
             }
 
+            fineLocationResult = mPolicy.onDeliver(getIdentity(), getPermissionLevel(),
+                    getRequest().getIntervalMillis(), fineLocationResult);
+            if (fineLocationResult == null) {
+                return null;
+            }
+
             LocationResult permittedLocationResult = Objects.requireNonNull(
                     getPermittedLocationResult(fineLocationResult, getPermissionLevel()));
 
@@ -1360,6 +1366,9 @@ public class LocationProviderManager extends
                 fineLocationResult = null;
             }
 
+            fineLocationResult = mPolicy.onDeliverSingleShot(
+                    getIdentity(), getPermissionLevel(), fineLocationResult);
+
             // lastly - note app ops
             if (fineLocationResult != null) {
                 int op =
@@ -1537,6 +1546,9 @@ public class LocationProviderManager extends
     private final AltitudeConverter mAltitudeConverter = new AltitudeConverter();
     private volatile boolean mIsAltitudeConverterIdle = true;
 
+    private final LocationPolicyBridge mPolicy =
+            new LocationPolicyBridge(this, mMultiplexerLock, () -> mState == STATE_STARTED);
+
     public LocationProviderManager(Context context, Injector injector,
             String name, @Nullable PassiveLocationProviderManager passiveManager) {
         this(context, injector, name, passiveManager, Collections.emptyList());
@@ -1607,6 +1619,7 @@ public class LocationProviderManager extends
             try {
                 mProvider.getController().start();
                 onUserStarted(UserHandle.USER_ALL);
+                mPolicy.onStateChangedLocked();
             } finally {
                 Binder.restoreCallingIdentity(identity);
             }
@@ -1753,6 +1766,7 @@ public class LocationProviderManager extends
 
                 mLocationFudger.resetOffsets();
             }
+            mPolicy.onStateChangedLocked();
         }
     }
 
@@ -1803,11 +1817,11 @@ public class LocationProviderManager extends
         }
 
         Location location = getPermittedLocation(
-                getLastLocationUnsafe(
+                mPolicy.onGetLastLocation(identity, permissionLevel, getLastLocationUnsafe(
                         identity.getUserId(),
                         permissionLevel,
                         request.isBypass(),
-                        Long.MAX_VALUE),
+                        Long.MAX_VALUE)),
                 permissionLevel);
 
         if (location != null) {
@@ -2292,6 +2306,7 @@ public class LocationProviderManager extends
             Log.d(TAG, mName + " provider request changed to " + request);
         }
         mProvider.getController().setRequest(request);
+        mPolicy.onStateChangedLocked();
 
         FgThread.getHandler().post(() -> {
             for (IProviderRequestListener listener : mProviderRequestListeners) {
@@ -2625,6 +2640,11 @@ public class LocationProviderManager extends
     @GuardedBy("mMultiplexerLock")
     @Override
     public void onReportLocation(LocationResult locationResult) {
+        locationResult = mPolicy.onReportLocationLocked(locationResult);
+        if (locationResult == null) {
+            return;
+        }
+
         LocationResult processed;
         if (mPassiveManager != null) {
             processed = processReportedLocation(locationResult);
