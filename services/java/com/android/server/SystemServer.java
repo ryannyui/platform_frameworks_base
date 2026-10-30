@@ -1730,6 +1730,9 @@ public final class SystemServer implements Dumpable {
                 t.traceEnd();
             }
 
+            com.android.server.ext.apipolicy.ApiPolicyManagerService.start(
+                    context, mSystemServiceManager, t);
+
             t.traceBegin("StartDynamicSystemService");
             dynamicSystem = new DynamicSystemService(context);
             ServiceManager.addService("dynamic_system", dynamicSystem);
