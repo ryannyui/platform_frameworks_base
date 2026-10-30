@@ -3,6 +3,7 @@ package com.android.internal.ext.apipolicy;
 import com.android.internal.ext.apipolicy.HookPointInfo;
 import com.android.internal.ext.apipolicy.PolicyScriptInfo;
 import com.android.internal.ext.apipolicy.PolicyScriptSummary;
+import com.android.internal.ext.apipolicy.PolicyServiceStatus;
 import com.android.internal.ext.apipolicy.ValidationResult;
 
 /**
@@ -11,11 +12,14 @@ import com.android.internal.ext.apipolicy.ValidationResult;
  * @hide
  */
 interface IApiPolicyManager {
+    const int ERROR_PERSIST_FAILED = 1;
+
     List<HookPointInfo> listHookPoints();
     @nullable HookPointInfo getHookPoint(@utf8InCpp String pointId);
 
     List<PolicyScriptSummary> listScripts();
     @nullable PolicyScriptInfo getScript(@utf8InCpp String scriptId);
+    PolicyServiceStatus getServiceStatus();
 
     ValidationResult validateScript(@utf8InCpp String source);
     ValidationResult upsertScript(@utf8InCpp String scriptId, @utf8InCpp String source, boolean enabled);

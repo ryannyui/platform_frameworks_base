@@ -7,6 +7,7 @@ import android.os.Binder;
 import android.os.Build;
 import android.os.Process;
 import android.os.ResultReceiver;
+import android.os.ServiceSpecificException;
 import android.os.ShellCallback;
 import android.os.SystemProperties;
 import android.util.ArrayMap;
@@ -17,6 +18,7 @@ import com.android.internal.ext.apipolicy.HookPointInfo;
 import com.android.internal.ext.apipolicy.IApiPolicyManager;
 import com.android.internal.ext.apipolicy.PolicyScriptInfo;
 import com.android.internal.ext.apipolicy.PolicyScriptSummary;
+import com.android.internal.ext.apipolicy.PolicyServiceStatus;
 import com.android.internal.ext.apipolicy.ValidationResult;
 import com.android.internal.os.BackgroundThread;
 import com.android.internal.util.DumpUtils;
@@ -33,6 +35,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -115,6 +118,13 @@ public final class ApiPolicyManagerService extends SystemService {
     @GuardedBy("mConfigLock")
     private final LinkedHashMap<String, ManagedScriptRecord> mScripts = new LinkedHashMap<>();
 
+    @GuardedBy("mConfigLock")
+    @Nullable
+    private String mStorageError;
+
+    @GuardedBy("mConfigLock")
+    private int mRejectedScriptCount;
+
     private final ConcurrentHashMap<String, HookPointRecord> mHookPoints =
             new ConcurrentHashMap<>();
 
@@ -161,18 +171,23 @@ public final class ApiPolicyManagerService extends SystemService {
     }
 
     private void loadPersistedScripts() {
-        List<PolicyScriptStore.PersistedScript> persisted = mStore.loadAll();
-        if (persisted.isEmpty()) {
-            return;
-        }
-
+        PolicyScriptStore.LoadResult persisted = mStore.loadAll();
         boolean disabledByProp = isGloballyDisabled();
         synchronized (mConfigLock) {
-            for (PolicyScriptStore.PersistedScript item : persisted) {
+            mStorageError = persisted.errorMessage;
+            mRejectedScriptCount = persisted.rejectedCount;
+            for (PolicyScriptStore.PersistedScript item : persisted.scripts) {
+                if (mScripts.containsKey(item.scriptId)) {
+                    mRejectedScriptCount++;
+                    continue;
+                }
                 ManagedScriptRecord rec = new ManagedScriptRecord(
                         item.scriptId, item.source, item.enabled, item.updatedAtMs);
                 if (item.enabled && !disabledByProp) {
-                    compileIntoRecordLocked(rec);
+                    ValidationResult result = compileIntoRecordLocked(rec);
+                    if (!result.valid) {
+                        mRejectedScriptCount++;
+                    }
                 }
                 mScripts.put(rec.scriptId, rec);
             }
@@ -279,29 +294,106 @@ public final class ApiPolicyManagerService extends SystemService {
     }
 
     @GuardedBy("mConfigLock")
-    private void persistLocked() {
-        List<PolicyScriptStore.PersistedScript> snapshot = new ArrayList<>(mScripts.size());
+    private LinkedHashMap<String, ManagedScriptRecord> copyScriptsLocked() {
+        LinkedHashMap<String, ManagedScriptRecord> copy = new LinkedHashMap<>();
         for (ManagedScriptRecord rec : mScripts.values()) {
+            ManagedScriptRecord item = new ManagedScriptRecord(
+                    rec.scriptId, rec.source, rec.enabled, rec.updatedAtMs);
+            item.compiled = rec.compiled;
+            item.lastCompileError = rec.lastCompileError;
+            copy.put(item.scriptId, item);
+        }
+        return copy;
+    }
+
+    private static IdentityHashMap<CompiledScript, Boolean> collectCompiled(
+            Iterable<ManagedScriptRecord> records) {
+        IdentityHashMap<CompiledScript, Boolean> compiled = new IdentityHashMap<>();
+        for (ManagedScriptRecord rec : records) {
+            if (rec.compiled != null) {
+                compiled.put(rec.compiled, Boolean.TRUE);
+            }
+        }
+        return compiled;
+    }
+
+    @GuardedBy("mConfigLock")
+    private void discardCandidateScriptsLocked(
+            LinkedHashMap<String, ManagedScriptRecord> candidate) {
+        IdentityHashMap<CompiledScript, Boolean> current = collectCompiled(mScripts.values());
+        for (ManagedScriptRecord rec : candidate.values()) {
+            if (rec.compiled != null && !current.containsKey(rec.compiled)) {
+                rec.compiled.releaseOwner();
+                rec.compiled = null;
+            }
+        }
+        mHookPoints.values().removeIf(
+                rec -> !rec.builtin && rec.activeBindings.length == 0);
+    }
+
+    @GuardedBy("mConfigLock")
+    private void commitCandidateScriptsLocked(
+            LinkedHashMap<String, ManagedScriptRecord> candidate) {
+        IdentityHashMap<CompiledScript, Boolean> retained = collectCompiled(candidate.values());
+        LinkedHashMap<String, ManagedScriptRecord> previous =
+                new LinkedHashMap<>(mScripts);
+        mScripts.clear();
+        mScripts.putAll(candidate);
+        rebuildBindingsLocked();
+        for (ManagedScriptRecord rec : previous.values()) {
+            if (rec.compiled != null && !retained.containsKey(rec.compiled)) {
+                rec.compiled.releaseOwner();
+                rec.compiled = null;
+            }
+        }
+    }
+
+    @GuardedBy("mConfigLock")
+    private void persistCandidateScriptsLocked(
+            LinkedHashMap<String, ManagedScriptRecord> candidate) {
+        List<PolicyScriptStore.PersistedScript> snapshot = new ArrayList<>(candidate.size());
+        for (ManagedScriptRecord rec : candidate.values()) {
             snapshot.add(new PolicyScriptStore.PersistedScript(
                     rec.scriptId, rec.source, rec.enabled, rec.updatedAtMs));
         }
-        mStore.saveAll(snapshot);
+        try {
+            mStore.saveAll(snapshot);
+        } catch (Exception e) {
+            mStorageError = "Store write failed (" + e.getClass().getSimpleName() + ")";
+            discardCandidateScriptsLocked(candidate);
+            throw new ServiceSpecificException(IApiPolicyManager.ERROR_PERSIST_FAILED,
+                    "Failed to persist policy scripts; active configuration was not changed");
+        }
+        mStorageError = null;
+        commitCandidateScriptsLocked(candidate);
     }
 
     private void tripCircuitBreakerAsync(CompiledScript tripped) {
         synchronized (mConfigLock) {
-            ManagedScriptRecord rec = mScripts.get(tripped.scriptId);
-            if (rec == null || rec.compiled != tripped || !rec.enabled) {
+            ManagedScriptRecord current = mScripts.get(tripped.scriptId);
+            if (current == null || current.compiled != tripped || !current.enabled) {
                 return;
             }
+            LinkedHashMap<String, ManagedScriptRecord> candidate = copyScriptsLocked();
+            ManagedScriptRecord rec = candidate.get(tripped.scriptId);
             rec.enabled = false;
             rec.lastCompileError =
                     "Auto-disabled after " + CompiledScript.CIRCUIT_BREAKER_THRESHOLD
                             + " consecutive errors: " + tripped.lastError;
             rec.compiled = null;
-            rebuildBindingsLocked();
-            persistLocked();
-            tripped.releaseOwner();
+            try {
+                persistCandidateScriptsLocked(candidate);
+            } catch (ServiceSpecificException e) {
+                current.enabled = false;
+                current.lastCompileError = rec.lastCompileError;
+                current.compiled = null;
+                rebuildBindingsLocked();
+                tripped.releaseOwner();
+                appendSingleLog(tripped.scriptId,
+                        "[circuit-breaker] Auto-disabled in memory, but persistence failed");
+                Slog.e(TAG, "Failed to persist circuit breaker for " + tripped.scriptId, e);
+                return;
+            }
         }
         appendSingleLog(tripped.scriptId,
                 "[circuit-breaker] Auto-disabled script after repeated runtime errors");
@@ -510,47 +602,43 @@ public final class ApiPolicyManagerService extends SystemService {
 
         long now = System.currentTimeMillis();
         synchronized (mConfigLock) {
-            ManagedScriptRecord existing = mScripts.get(scriptId);
+            LinkedHashMap<String, ManagedScriptRecord> candidate = copyScriptsLocked();
+            ManagedScriptRecord existing = candidate.get(scriptId);
             if (existing == null) {
                 ManagedScriptRecord rec = new ManagedScriptRecord(scriptId, source, enabled, now);
                 if (enabled) {
                     ValidationResult compRes = compileIntoRecordLocked(rec);
                     if (!compRes.valid) {
+                        discardCandidateScriptsLocked(candidate);
                         return compRes;
                     }
                     res = compRes;
                 } else {
                     res = dryRunForDisabled;
                 }
-                mScripts.put(scriptId, rec);
+                candidate.put(scriptId, rec);
             } else {
-                String oldSource = existing.source;
-                boolean oldEnabled = existing.enabled;
                 existing.source = source;
                 existing.enabled = enabled;
+                existing.updatedAtMs = now;
 
                 if (enabled) {
+                    existing.compiled = null;
                     ValidationResult compRes = compileIntoRecordLocked(existing);
                     if (!compRes.valid) {
-                        existing.source = oldSource;
-                        existing.enabled = oldEnabled;
+                        mScripts.get(scriptId).lastCompileError = existing.lastCompileError;
+                        discardCandidateScriptsLocked(candidate);
                         return compRes;
                     }
-                    existing.updatedAtMs = now;
                     res = compRes;
                 } else {
-                    if (existing.compiled != null) {
-                        existing.compiled.releaseOwner();
-                        existing.compiled = null;
-                    }
+                    existing.compiled = null;
                     existing.lastCompileError = null;
-                    existing.updatedAtMs = now;
                     res = dryRunForDisabled;
                 }
             }
 
-            rebuildBindingsLocked();
-            persistLocked();
+            persistCandidateScriptsLocked(candidate);
             return res;
         }
     }
@@ -560,29 +648,30 @@ public final class ApiPolicyManagerService extends SystemService {
             return false;
         }
         synchronized (mConfigLock) {
-            ManagedScriptRecord rec = mScripts.get(scriptId);
-            if (rec == null) {
+            ManagedScriptRecord current = mScripts.get(scriptId);
+            if (current == null) {
                 return false;
             }
-            if (rec.enabled == enabled && (!enabled || rec.compiled != null)) {
+            if (current.enabled == enabled && (!enabled || current.compiled != null)) {
                 return true;
             }
+            LinkedHashMap<String, ManagedScriptRecord> candidate = copyScriptsLocked();
+            ManagedScriptRecord rec = candidate.get(scriptId);
             if (enabled) {
+                rec.compiled = null;
                 ValidationResult vr = compileIntoRecordLocked(rec);
                 if (!vr.valid) {
+                    current.lastCompileError = rec.lastCompileError;
+                    discardCandidateScriptsLocked(candidate);
                     return false;
                 }
                 rec.enabled = true;
             } else {
                 rec.enabled = false;
-                if (rec.compiled != null) {
-                    rec.compiled.releaseOwner();
-                    rec.compiled = null;
-                }
+                rec.compiled = null;
             }
             rec.updatedAtMs = System.currentTimeMillis();
-            rebuildBindingsLocked();
-            persistLocked();
+            persistCandidateScriptsLocked(candidate);
             return true;
         }
     }
@@ -596,11 +685,20 @@ public final class ApiPolicyManagerService extends SystemService {
             if (rec == null || !rec.enabled) {
                 return false;
             }
-            ValidationResult vr = compileIntoRecordLocked(rec);
+            ManagedScriptRecord candidate = new ManagedScriptRecord(
+                    rec.scriptId, rec.source, rec.enabled, rec.updatedAtMs);
+            ValidationResult vr = compileIntoRecordLocked(candidate);
             if (!vr.valid) {
+                rec.lastCompileError = candidate.lastCompileError;
                 return false;
             }
+            CompiledScript previous = rec.compiled;
+            rec.compiled = candidate.compiled;
+            rec.lastCompileError = null;
             rebuildBindingsLocked();
+            if (previous != null) {
+                previous.releaseOwner();
+            }
             return true;
         }
     }
@@ -610,17 +708,25 @@ public final class ApiPolicyManagerService extends SystemService {
             return false;
         }
         synchronized (mConfigLock) {
-            ManagedScriptRecord removed = mScripts.remove(scriptId);
-            if (removed == null) {
+            if (!mScripts.containsKey(scriptId)) {
                 return false;
             }
-            if (removed.compiled != null) {
-                removed.compiled.releaseOwner();
-                removed.compiled = null;
-            }
-            rebuildBindingsLocked();
-            persistLocked();
+            LinkedHashMap<String, ManagedScriptRecord> candidate = copyScriptsLocked();
+            candidate.remove(scriptId);
+            persistCandidateScriptsLocked(candidate);
             return true;
+        }
+    }
+
+    PolicyServiceStatus getServiceStatusInternal() {
+        synchronized (mConfigLock) {
+            PolicyServiceStatus status = new PolicyServiceStatus();
+            status.globallyDisabled = isGloballyDisabled();
+            status.storageHealthy = mStorageError == null;
+            status.storageError = mStorageError;
+            status.loadedScriptCount = mScripts.size();
+            status.rejectedScriptCount = mRejectedScriptCount;
+            return status;
         }
     }
 
@@ -841,6 +947,17 @@ public final class ApiPolicyManagerService extends SystemService {
         }
 
         @Override
+        public PolicyServiceStatus getServiceStatus() {
+            enforceManagePermission();
+            final long token = Binder.clearCallingIdentity();
+            try {
+                return getServiceStatusInternal();
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override
         public ValidationResult validateScript(String source) {
             enforceManagePermission();
             final long token = Binder.clearCallingIdentity();
@@ -935,7 +1052,15 @@ public final class ApiPolicyManagerService extends SystemService {
                 return;
             }
             pw.println("ApiPolicyManagerService status:");
-            pw.println("  Globally disabled (" + PROP_DISABLE + "): " + isGloballyDisabled());
+            PolicyServiceStatus status = getServiceStatusInternal();
+            pw.println("  Globally disabled (" + PROP_DISABLE + "): "
+                    + status.globallyDisabled);
+            pw.println("  Storage healthy: " + status.storageHealthy);
+            if (status.storageError != null) {
+                pw.println("  Storage error: " + status.storageError);
+            }
+            pw.println("  Loaded scripts: " + status.loadedScriptCount);
+            pw.println("  Rejected during restore: " + status.rejectedScriptCount);
             pw.println();
             pw.println("Registered Hook Points:");
             for (HookPointInfo hp : listHookPointsInternal()) {

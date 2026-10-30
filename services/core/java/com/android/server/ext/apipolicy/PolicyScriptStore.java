@@ -1,5 +1,6 @@
 package com.android.server.ext.apipolicy;
 
+import android.annotation.Nullable;
 import android.os.Environment;
 import android.util.AtomicFile;
 import android.util.JsonReader;
@@ -40,18 +41,37 @@ final class PolicyScriptStore {
         }
     }
 
+    static final class LoadResult {
+        final List<PersistedScript> scripts;
+        final int rejectedCount;
+        @Nullable final String errorMessage;
+
+        LoadResult(List<PersistedScript> scripts, int rejectedCount,
+                @Nullable String errorMessage) {
+            this.scripts = scripts;
+            this.rejectedCount = rejectedCount;
+            this.errorMessage = errorMessage;
+        }
+    }
+
     private final File mDir;
     private final AtomicFile mAtomicFile;
 
     PolicyScriptStore() {
-        mDir = new File(Environment.getDataSystemDirectory(), "apipolicy");
+        this(new File(Environment.getDataSystemDirectory(), "apipolicy"));
+    }
+
+    PolicyScriptStore(File dir) {
+        mDir = dir;
         mAtomicFile = new AtomicFile(new File(mDir, "scripts.json"));
     }
 
-    List<PersistedScript> loadAll() {
+    LoadResult loadAll() {
         List<PersistedScript> out = new ArrayList<>();
-        if (!mAtomicFile.getBaseFile().exists()) {
-            return out;
+        int rejectedCount = 0;
+        String errorMessage = null;
+        if (!mAtomicFile.exists()) {
+            return new LoadResult(out, 0, null);
         }
 
         try (FileInputStream fis = mAtomicFile.openRead();
@@ -65,8 +85,8 @@ final class PolicyScriptStore {
                     if (version > SCHEMA_VERSION) {
                         Slog.w(TAG, "Unsupported policy script store version " + version
                                 + " (max supported=" + SCHEMA_VERSION + ")");
-                        out.clear();
-                        return out;
+                        return new LoadResult(new ArrayList<>(), 0,
+                                "Unsupported store schema version " + version);
                     }
                 } else if ("scripts".equals(name)) {
                     reader.beginArray();
@@ -74,6 +94,8 @@ final class PolicyScriptStore {
                         PersistedScript item = readScriptItem(reader);
                         if (item != null) {
                             out.add(item);
+                        } else {
+                            rejectedCount++;
                         }
                     }
                     reader.endArray();
@@ -84,8 +106,10 @@ final class PolicyScriptStore {
             reader.endObject();
         } catch (Exception e) {
             Slog.e(TAG, "Failed to read persisted policy scripts", e);
+            out.clear();
+            errorMessage = "Store read failed (" + e.getClass().getSimpleName() + ")";
         }
-        return out;
+        return new LoadResult(out, rejectedCount, errorMessage);
     }
 
     private static PersistedScript readScriptItem(JsonReader reader) throws IOException {
@@ -113,13 +137,14 @@ final class PolicyScriptStore {
         return new PersistedScript(id, source, enabled, updatedAtMs);
     }
 
-    void saveAll(Collection<PersistedScript> scripts) {
-        if (!mDir.exists() && !mDir.mkdirs()) {
-            Slog.e(TAG, "Unable to create directory " + mDir);
-            return;
+    void saveAll(Collection<PersistedScript> scripts) throws IOException {
+        if (!mDir.exists() && !mDir.mkdirs() && !mDir.isDirectory()) {
+            throw new IOException("Unable to create policy script store directory");
         }
 
         FileOutputStream fos = null;
+        File baseFile = mAtomicFile.getBaseFile();
+        File newFile = new File(baseFile.getPath() + ".new");
         try {
             fos = mAtomicFile.startWrite();
             JsonWriter writer = new JsonWriter(
@@ -140,12 +165,23 @@ final class PolicyScriptStore {
             writer.endArray();
             writer.endObject();
             writer.flush();
-            mAtomicFile.finishWrite(fos);
+            fos.getFD().sync();
+            fos.close();
+            fos = null;
+            if (!newFile.renameTo(baseFile)) {
+                throw new IOException("Failed to commit policy script store");
+            }
         } catch (Exception e) {
             Slog.e(TAG, "Failed to persist policy scripts", e);
             if (fos != null) {
                 mAtomicFile.failWrite(fos);
+            } else if (newFile.exists() && !newFile.delete()) {
+                Slog.e(TAG, "Failed to delete incomplete policy script store");
             }
+            if (e instanceof IOException ioException) {
+                throw ioException;
+            }
+            throw new IOException("Failed to persist policy scripts", e);
         }
     }
 }

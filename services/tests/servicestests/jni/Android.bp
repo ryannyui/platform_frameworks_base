@@ -26,6 +26,7 @@ cc_library_shared {
         ":lib_anrTimer_native",
         ":lib_lazilyRegisteredServices_native",
         ":lib_memoryLimiter_native",
+        ":lib_apipolicy_native",
         "onload.cpp",
     ],
 
@@ -59,5 +60,9 @@ cc_library_shared {
         "android.hardware.graphics.common@1.2",
         "android.hardware.graphics.mapper@4.0",
         "android.hidl.token@1.0-utils",
+    ],
+
+    static_libs: [
+        "liblua",
     ],
 }

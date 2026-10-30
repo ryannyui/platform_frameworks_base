@@ -74,7 +74,7 @@ cc_library_static {
         "com_android_server_sensor_SensorService.cpp",
         "com_android_server_utils_LongMethodTracer.cpp",
         "com_android_server_wm_TaskFpsCallbackController.cpp",
-        "com_android_server_ext_apipolicy_PolicyScriptEngine.cpp",
+        ":lib_apipolicy_native",
         "onload.cpp",
         ":lib_cachedAppOptimizer_native",
         ":lib_freezer_native",
@@ -269,6 +269,13 @@ filegroup {
         "com_android_server_connectivity_Vpn.cpp",
         "com_android_server_tv_TvUinputBridge.cpp",
         "com_android_server_utils_LazyJniRegistrar.cpp",
+    ],
+}
+
+filegroup {
+    name: "lib_apipolicy_native",
+    srcs: [
+        "com_android_server_ext_apipolicy_PolicyScriptEngine.cpp",
     ],
 }
 

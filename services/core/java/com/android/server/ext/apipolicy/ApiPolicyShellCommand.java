@@ -8,6 +8,7 @@ import android.os.ShellCommand;
 import com.android.internal.ext.apipolicy.HookPointInfo;
 import com.android.internal.ext.apipolicy.PolicyScriptInfo;
 import com.android.internal.ext.apipolicy.PolicyScriptSummary;
+import com.android.internal.ext.apipolicy.PolicyServiceStatus;
 import com.android.internal.ext.apipolicy.ValidationResult;
 
 import java.io.ByteArrayOutputStream;
@@ -50,6 +51,7 @@ final class ApiPolicyShellCommand extends ShellCommand {
             return switch (cmd) {
                 case "points" -> runPoints(pw);
                 case "scripts" -> runScripts(pw);
+                case "status" -> runStatus(pw);
                 case "show" -> runShow(pw, err);
                 case "validate" -> runValidate(pw, err);
                 case "apply" -> runApply(pw, err);
@@ -108,6 +110,20 @@ final class ApiPolicyShellCommand extends ShellCommand {
             if (s.lastError != null) {
                 pw.println("  lastError: " + s.lastError);
             }
+        }
+        return 0;
+    }
+
+    private int runStatus(PrintWriter pw) {
+        PolicyServiceStatus status = mService.getServiceStatusInternal();
+        pw.printf(Locale.US,
+                "globallyDisabled=%b  storageHealthy=%b  loadedScripts=%d  rejectedOnRestore=%d%n",
+                status.globallyDisabled,
+                status.storageHealthy,
+                status.loadedScriptCount,
+                status.rejectedScriptCount);
+        if (status.storageError != null) {
+            pw.println("storageError: " + status.storageError);
         }
         return 0;
     }
@@ -279,6 +295,8 @@ final class ApiPolicyShellCommand extends ShellCommand {
         pw.println("      List all registered hook points and counters.");
         pw.println("  scripts");
         pw.println("      List all configured policy scripts and runtime metrics.");
+        pw.println("  status");
+        pw.println("      Show service, storage, and restore health.");
         pw.println("  show <scriptId>");
         pw.println("      Display the Lua source of a script.");
         pw.println("  validate - | validate --code <luaSource>");
