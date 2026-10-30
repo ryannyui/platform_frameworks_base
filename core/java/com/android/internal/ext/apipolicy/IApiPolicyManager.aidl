@@ -2,6 +2,7 @@ package com.android.internal.ext.apipolicy;
 
 import com.android.internal.ext.apipolicy.HookPointInfo;
 import com.android.internal.ext.apipolicy.PolicyScriptInfo;
+import com.android.internal.ext.apipolicy.PolicyScriptSummary;
 import com.android.internal.ext.apipolicy.ValidationResult;
 
 /**
@@ -13,7 +14,7 @@ interface IApiPolicyManager {
     List<HookPointInfo> listHookPoints();
     @nullable HookPointInfo getHookPoint(@utf8InCpp String pointId);
 
-    List<PolicyScriptInfo> listScripts();
+    List<PolicyScriptSummary> listScripts();
     @nullable PolicyScriptInfo getScript(@utf8InCpp String scriptId);
 
     ValidationResult validateScript(@utf8InCpp String source);

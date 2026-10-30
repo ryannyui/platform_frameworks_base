@@ -16,6 +16,7 @@ import com.android.internal.annotations.GuardedBy;
 import com.android.internal.ext.apipolicy.HookPointInfo;
 import com.android.internal.ext.apipolicy.IApiPolicyManager;
 import com.android.internal.ext.apipolicy.PolicyScriptInfo;
+import com.android.internal.ext.apipolicy.PolicyScriptSummary;
 import com.android.internal.ext.apipolicy.ValidationResult;
 import com.android.internal.os.BackgroundThread;
 import com.android.internal.util.DumpUtils;
@@ -379,11 +380,11 @@ public final class ApiPolicyManagerService extends SystemService {
         return info;
     }
 
-    List<PolicyScriptInfo> listScriptsInternal() {
+    List<PolicyScriptSummary> listScriptsInternal() {
         synchronized (mConfigLock) {
-            List<PolicyScriptInfo> out = new ArrayList<>(mScripts.size());
+            List<PolicyScriptSummary> out = new ArrayList<>(mScripts.size());
             for (ManagedScriptRecord rec : mScripts.values()) {
-                out.add(toScriptInfoLocked(rec));
+                out.add(toScriptSummaryLocked(rec));
             }
             return out;
         }
@@ -401,11 +402,10 @@ public final class ApiPolicyManagerService extends SystemService {
     }
 
     @GuardedBy("mConfigLock")
-    private static PolicyScriptInfo toScriptInfoLocked(ManagedScriptRecord rec) {
-        PolicyScriptInfo info = new PolicyScriptInfo();
+    private static PolicyScriptSummary toScriptSummaryLocked(ManagedScriptRecord rec) {
+        PolicyScriptSummary info = new PolicyScriptSummary();
         info.scriptId = rec.scriptId;
         info.enabled = rec.enabled;
-        info.source = rec.source;
         info.updatedAtMs = rec.updatedAtMs;
         CompiledScript cs = rec.compiled;
         if (cs != null) {
@@ -421,6 +421,22 @@ public final class ApiPolicyManagerService extends SystemService {
             info.lastEvalMicros = 0;
             info.lastError = rec.lastCompileError;
         }
+        return info;
+    }
+
+    @GuardedBy("mConfigLock")
+    private static PolicyScriptInfo toScriptInfoLocked(ManagedScriptRecord rec) {
+        PolicyScriptSummary summary = toScriptSummaryLocked(rec);
+        PolicyScriptInfo info = new PolicyScriptInfo();
+        info.scriptId = summary.scriptId;
+        info.enabled = summary.enabled;
+        info.source = rec.source;
+        info.registeredPoints = summary.registeredPoints;
+        info.invokeCount = summary.invokeCount;
+        info.errorCount = summary.errorCount;
+        info.lastEvalMicros = summary.lastEvalMicros;
+        info.lastError = summary.lastError;
+        info.updatedAtMs = summary.updatedAtMs;
         return info;
     }
 
@@ -802,7 +818,7 @@ public final class ApiPolicyManagerService extends SystemService {
         }
 
         @Override
-        public List<PolicyScriptInfo> listScripts() {
+        public List<PolicyScriptSummary> listScripts() {
             enforceManagePermission();
             final long token = Binder.clearCallingIdentity();
             try {
@@ -930,7 +946,7 @@ public final class ApiPolicyManagerService extends SystemService {
             }
             pw.println();
             pw.println("Scripts:");
-            for (PolicyScriptInfo sc : listScriptsInternal()) {
+            for (PolicyScriptSummary sc : listScriptsInternal()) {
                 pw.printf(Locale.US,
                         "  - %s enabled=%b points=[%s] invoke=%d error=%d lastEvalUs=%d"
                                 + " updatedAtMs=%d%n",

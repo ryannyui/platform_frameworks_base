@@ -7,6 +7,7 @@ import android.os.ShellCommand;
 
 import com.android.internal.ext.apipolicy.HookPointInfo;
 import com.android.internal.ext.apipolicy.PolicyScriptInfo;
+import com.android.internal.ext.apipolicy.PolicyScriptSummary;
 import com.android.internal.ext.apipolicy.ValidationResult;
 
 import java.io.ByteArrayOutputStream;
@@ -88,12 +89,12 @@ final class ApiPolicyShellCommand extends ShellCommand {
     }
 
     private int runScripts(PrintWriter pw) {
-        List<PolicyScriptInfo> scripts = mService.listScriptsInternal();
+        List<PolicyScriptSummary> scripts = mService.listScriptsInternal();
         if (scripts.isEmpty()) {
             pw.println("No scripts configured.");
             return 0;
         }
-        for (PolicyScriptInfo s : scripts) {
+        for (PolicyScriptSummary s : scripts) {
             pw.printf(Locale.US,
                     "%s  enabled=%b  points=[%s]  invoke=%d  error=%d  lastEvalUs=%d"
                             + "  updatedAtMs=%d%n",
