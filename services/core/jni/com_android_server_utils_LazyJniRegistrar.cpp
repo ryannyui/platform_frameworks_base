@@ -23,6 +23,7 @@ namespace android {
 // Forward declared per-class registration methods.
 int register_android_server_app_GameManagerService(JNIEnv* env);
 int register_android_server_connectivity_Vpn(JNIEnv* env);
+int register_android_server_ext_apipolicy_PolicyScriptEngine(JNIEnv* env);
 int register_android_server_tv_TvUinputBridge(JNIEnv* env);
 
 namespace {
@@ -43,10 +44,15 @@ void registerVpn(JNIEnv* env, jclass) {
     register_android_server_connectivity_Vpn(env);
 }
 
+void registerApiPolicyEngine(JNIEnv* env, jclass) {
+    register_android_server_ext_apipolicy_PolicyScriptEngine(env);
+}
+
 static const JNINativeMethod sJniRegistrarMethods[] = {
         {"registerGameManagerService", "()V", (void*)registerGameManagerService},
         {"registerTvUinputBridge", "()V", (void*)registerTvUinputBridge},
         {"registerVpn", "()V", (void*)registerVpn},
+        {"registerApiPolicyEngine", "()V", (void*)registerApiPolicyEngine},
 };
 
 } // namespace

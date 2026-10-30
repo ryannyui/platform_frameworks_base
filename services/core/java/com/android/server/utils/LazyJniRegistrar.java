@@ -47,4 +47,7 @@ public final class LazyJniRegistrar {
 
     /** Registers native methods for Vpn (the JNI counterpart for VpnManagerService). */
     public static native void registerVpn();
+
+    /** Registers native methods for the API policy Lua engine (PolicyScriptEngine). */
+    public static native void registerApiPolicyEngine();
 }
