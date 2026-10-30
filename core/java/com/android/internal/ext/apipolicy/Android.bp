@@ -1,0 +1,13 @@
+package {
+    // See: http://go/android-license-faq
+    default_applicable_licenses: ["frameworks_base_license"],
+}
+
+java_test {
+    name: "apipolicy-test-aidl",
+    sdk_version: "current",
+    srcs: ["**/*.aidl"],
+    aidl: {
+        include_dirs: ["frameworks/base/core/java"],
+    },
+}

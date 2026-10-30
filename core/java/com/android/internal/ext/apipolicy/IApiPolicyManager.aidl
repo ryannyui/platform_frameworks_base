@@ -1,6 +1,7 @@
 package com.android.internal.ext.apipolicy;
 
 import com.android.internal.ext.apipolicy.HookPointInfo;
+import com.android.internal.ext.apipolicy.IApiPolicyListener;
 import com.android.internal.ext.apipolicy.PolicyScriptInfo;
 import com.android.internal.ext.apipolicy.PolicyScriptSummary;
 import com.android.internal.ext.apipolicy.PolicyServiceStatus;
@@ -20,6 +21,8 @@ interface IApiPolicyManager {
     List<PolicyScriptSummary> listScripts();
     @nullable PolicyScriptInfo getScript(@utf8InCpp String scriptId);
     PolicyServiceStatus getServiceStatus();
+    void registerListener(IApiPolicyListener listener);
+    void unregisterListener(IApiPolicyListener listener);
 
     ValidationResult validateScript(@utf8InCpp String source);
     ValidationResult upsertScript(@utf8InCpp String scriptId, @utf8InCpp String source, boolean enabled);

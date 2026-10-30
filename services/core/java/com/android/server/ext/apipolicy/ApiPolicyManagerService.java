@@ -6,15 +6,18 @@ import android.content.Context;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Process;
+import android.os.RemoteCallbackList;
 import android.os.ResultReceiver;
 import android.os.ServiceSpecificException;
 import android.os.ShellCallback;
 import android.os.SystemProperties;
+import android.os.UserHandle;
 import android.util.ArrayMap;
 import android.util.Slog;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.ext.apipolicy.HookPointInfo;
+import com.android.internal.ext.apipolicy.IApiPolicyListener;
 import com.android.internal.ext.apipolicy.IApiPolicyManager;
 import com.android.internal.ext.apipolicy.PolicyScriptInfo;
 import com.android.internal.ext.apipolicy.PolicyScriptSummary;
@@ -125,11 +128,22 @@ public final class ApiPolicyManagerService extends SystemService {
     @GuardedBy("mConfigLock")
     private int mRejectedScriptCount;
 
+    @GuardedBy("mConfigLock")
+    private long mConfigVersion;
+
+    @GuardedBy("mConfigLock")
+    private boolean mLastGloballyDisabled = isGloballyDisabled();
+
+    @GuardedBy("mConfigLock")
+    private long mGlobalStateSequence;
+
     private final ConcurrentHashMap<String, HookPointRecord> mHookPoints =
             new ConcurrentHashMap<>();
 
     private final CopyOnWriteArrayList<Runnable> mBindingChangeListeners =
             new CopyOnWriteArrayList<>();
+    private final RemoteCallbackList<IApiPolicyListener> mPolicyListeners =
+            new RemoteCallbackList<>();
 
     @GuardedBy("mLogLock")
     private final ArrayDeque<LogEntry> mLogs = new ArrayDeque<>(MAX_LOG_BUFFER_SIZE);
@@ -138,9 +152,13 @@ public final class ApiPolicyManagerService extends SystemService {
     private final BinderService mBinderService = new BinderService();
 
     public ApiPolicyManagerService(Context context) {
+        this(context, new PolicyScriptStore());
+    }
+
+    ApiPolicyManagerService(Context context, PolicyScriptStore store) {
         super(context);
         mContext = context;
-        mStore = new PolicyScriptStore();
+        mStore = store;
     }
 
     /**
@@ -161,6 +179,7 @@ public final class ApiPolicyManagerService extends SystemService {
     public void onStart() {
         LocationPolicyHooks.registerHookPoints(mLocalService);
         loadPersistedScripts();
+        SystemProperties.addChangeCallback(this::onSystemPropertiesChanged);
         publishLocalService(ApiPolicyInternal.class, mLocalService);
         publishBinderService(SERVICE_NAME, mBinderService);
         Slog.i(TAG, "ApiPolicyManagerService started (disabled=" + isGloballyDisabled() + ")");
@@ -170,9 +189,61 @@ public final class ApiPolicyManagerService extends SystemService {
         return SystemProperties.getBoolean(PROP_DISABLE, false);
     }
 
+    private void onSystemPropertiesChanged() {
+        boolean disabled = isGloballyDisabled();
+        final long sequence;
+        synchronized (mConfigLock) {
+            if (disabled == mLastGloballyDisabled) {
+                return;
+            }
+            mLastGloballyDisabled = disabled;
+            sequence = ++mGlobalStateSequence;
+            if (disabled) {
+                bumpConfigVersionLocked();
+            }
+        }
+        if (!disabled) {
+            BackgroundThread.getHandler().post(() -> restoreScriptsAfterGlobalEnable(sequence));
+        }
+    }
+
+    private void restoreScriptsAfterGlobalEnable(long expectedSequence) {
+        synchronized (mConfigLock) {
+            if (!isCurrentGlobalEnable(expectedSequence)) {
+                return;
+            }
+            restoreEnabledScripts();
+            if (!isCurrentGlobalEnable(expectedSequence)) {
+                return;
+            }
+            bumpConfigVersionLocked();
+        }
+    }
+
+    @GuardedBy("mConfigLock")
+    private boolean isCurrentGlobalEnable(long expectedSequence) {
+        return expectedSequence == mGlobalStateSequence
+                && !mLastGloballyDisabled
+                && !isGloballyDisabled();
+    }
+
+    void restoreEnabledScripts() {
+        synchronized (mConfigLock) {
+            for (ManagedScriptRecord rec : mScripts.values()) {
+                if (rec.enabled && rec.compiled == null) {
+                    compileIntoRecordLocked(rec);
+                }
+            }
+            rebuildBindingsLocked();
+        }
+    }
+
     private void loadPersistedScripts() {
+        loadPersistedScripts(isGloballyDisabled());
+    }
+
+    void loadPersistedScripts(boolean disabledByProp) {
         PolicyScriptStore.LoadResult persisted = mStore.loadAll();
-        boolean disabledByProp = isGloballyDisabled();
         synchronized (mConfigLock) {
             mStorageError = persisted.errorMessage;
             mRejectedScriptCount = persisted.rejectedCount;
@@ -192,6 +263,7 @@ public final class ApiPolicyManagerService extends SystemService {
                 mScripts.put(rec.scriptId, rec);
             }
             rebuildBindingsLocked();
+            mConfigVersion = 1;
         }
     }
 
@@ -278,6 +350,36 @@ public final class ApiPolicyManagerService extends SystemService {
         dispatchBindingChangeAsync();
     }
 
+    @GuardedBy("mConfigLock")
+    private void bumpConfigVersionLocked() {
+        mConfigVersion++;
+        dispatchPolicyChangeAsync();
+    }
+
+    private void dispatchPolicyChangeAsync() {
+        final long version;
+        synchronized (mConfigLock) {
+            version = mConfigVersion;
+        }
+        if (mPolicyListeners.getRegisteredCallbackCount() == 0) {
+            return;
+        }
+        FgThread.getHandler().post(() -> {
+            int count = mPolicyListeners.beginBroadcast();
+            try {
+                for (int i = 0; i < count; i++) {
+                    try {
+                        mPolicyListeners.getBroadcastItem(i).onPolicyChanged(version);
+                    } catch (Throwable t) {
+                        Slog.e(TAG, "Policy listener failed", t);
+                    }
+                }
+            } finally {
+                mPolicyListeners.finishBroadcast();
+            }
+        });
+    }
+
     private void dispatchBindingChangeAsync() {
         if (mBindingChangeListeners.isEmpty()) {
             return;
@@ -346,6 +448,7 @@ public final class ApiPolicyManagerService extends SystemService {
                 rec.compiled = null;
             }
         }
+        bumpConfigVersionLocked();
     }
 
     @GuardedBy("mConfigLock")
@@ -389,6 +492,7 @@ public final class ApiPolicyManagerService extends SystemService {
                 current.compiled = null;
                 rebuildBindingsLocked();
                 tripped.releaseOwner();
+                bumpConfigVersionLocked();
                 appendSingleLog(tripped.scriptId,
                         "[circuit-breaker] Auto-disabled in memory, but persistence failed");
                 Slog.e(TAG, "Failed to persist circuit breaker for " + tripped.scriptId, e);
@@ -430,8 +534,15 @@ public final class ApiPolicyManagerService extends SystemService {
         if (Build.IS_DEBUGGABLE && uid == Process.SHELL_UID) {
             return;
         }
+        enforceSystemUser(uid);
         mContext.enforceCallingOrSelfPermission(
                 Manifest.permission.MANAGE_API_POLICY, "Requires MANAGE_API_POLICY");
+    }
+
+    static void enforceSystemUser(int uid) {
+        if (UserHandle.getUserId(uid) != UserHandle.USER_SYSTEM) {
+            throw new SecurityException("API policy management requires the system user");
+        }
     }
 
     // ---- Package-private management methods shared by BinderService & ApiPolicyShellCommand ----
@@ -699,6 +810,7 @@ public final class ApiPolicyManagerService extends SystemService {
             if (previous != null) {
                 previous.releaseOwner();
             }
+            bumpConfigVersionLocked();
             return true;
         }
     }
@@ -726,7 +838,20 @@ public final class ApiPolicyManagerService extends SystemService {
             status.storageError = mStorageError;
             status.loadedScriptCount = mScripts.size();
             status.rejectedScriptCount = mRejectedScriptCount;
+            status.configVersion = mConfigVersion;
             return status;
+        }
+    }
+
+    void registerListenerInternal(@Nullable IApiPolicyListener listener) {
+        if (listener != null) {
+            mPolicyListeners.register(listener);
+        }
+    }
+
+    void unregisterListenerInternal(@Nullable IApiPolicyListener listener) {
+        if (listener != null) {
+            mPolicyListeners.unregister(listener);
         }
     }
 
@@ -958,6 +1083,28 @@ public final class ApiPolicyManagerService extends SystemService {
         }
 
         @Override
+        public void registerListener(IApiPolicyListener listener) {
+            enforceManagePermission();
+            final long token = Binder.clearCallingIdentity();
+            try {
+                registerListenerInternal(listener);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override
+        public void unregisterListener(IApiPolicyListener listener) {
+            enforceManagePermission();
+            final long token = Binder.clearCallingIdentity();
+            try {
+                unregisterListenerInternal(listener);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override
         public ValidationResult validateScript(String source) {
             enforceManagePermission();
             final long token = Binder.clearCallingIdentity();
@@ -1061,6 +1208,7 @@ public final class ApiPolicyManagerService extends SystemService {
             }
             pw.println("  Loaded scripts: " + status.loadedScriptCount);
             pw.println("  Rejected during restore: " + status.rejectedScriptCount);
+            pw.println("  Config version: " + status.configVersion);
             pw.println();
             pw.println("Registered Hook Points:");
             for (HookPointInfo hp : listHookPointsInternal()) {

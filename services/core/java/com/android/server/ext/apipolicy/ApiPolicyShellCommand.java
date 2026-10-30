@@ -117,11 +117,13 @@ final class ApiPolicyShellCommand extends ShellCommand {
     private int runStatus(PrintWriter pw) {
         PolicyServiceStatus status = mService.getServiceStatusInternal();
         pw.printf(Locale.US,
-                "globallyDisabled=%b  storageHealthy=%b  loadedScripts=%d  rejectedOnRestore=%d%n",
+                "globallyDisabled=%b  storageHealthy=%b  loadedScripts=%d  rejectedOnRestore=%d"
+                        + "  configVersion=%d%n",
                 status.globallyDisabled,
                 status.storageHealthy,
                 status.loadedScriptCount,
-                status.rejectedScriptCount);
+                status.rejectedScriptCount,
+                status.configVersion);
         if (status.storageError != null) {
             pw.println("storageError: " + status.storageError);
         }

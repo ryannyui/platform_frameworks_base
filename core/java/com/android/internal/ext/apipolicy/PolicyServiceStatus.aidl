@@ -11,4 +11,5 @@ parcelable PolicyServiceStatus {
     @nullable @utf8InCpp String storageError;
     int loadedScriptCount;
     int rejectedScriptCount;
+    long configVersion;
 }

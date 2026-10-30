@@ -55,6 +55,7 @@ android_test {
         "com.android.server.flags.services-aconfig-java",
         "com_android_server_accessibility_flags_lib",
         "coretests-aidl",
+        "apipolicy-test-aidl",
         "cts-input-lib",
         "cts-wm-util",
         "desktop-test-lib",
