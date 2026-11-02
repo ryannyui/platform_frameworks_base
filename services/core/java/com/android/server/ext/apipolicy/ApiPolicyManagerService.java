@@ -63,6 +63,14 @@ public final class ApiPolicyManagerService extends SystemService {
     private static final int DEFAULT_MAX_EVAL_STEPS = 20_000;
     private static final int MAX_LOG_BUFFER_SIZE = 300;
 
+    /**
+     * Poll interval for {@link #PROP_DISABLE}. {@link SystemProperties#addChangeCallback} only
+     * fires for sysprop changes reported from inside this process, so an external {@code setprop}
+     * would otherwise go unnoticed. Reading a system property is a shared-memory load, so a 1s
+     * poll is cheap; the hook fast path still checks the property synchronously.
+     */
+    private static final long GLOBAL_STATE_POLL_INTERVAL_MS = 1000L;
+
     private static final CompiledScript[] EMPTY_BINDINGS = new CompiledScript[0];
 
     private static final class HookPointRecord {
@@ -134,6 +142,20 @@ public final class ApiPolicyManagerService extends SystemService {
     @GuardedBy("mConfigLock")
     private boolean mLastGloballyDisabled = isGloballyDisabled();
 
+    private final Runnable mGlobalStatePoller = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                onSystemPropertiesChanged();
+            } catch (Throwable t) {
+                Slog.e(TAG, "Failed to poll " + PROP_DISABLE, t);
+            } finally {
+                BackgroundThread.getHandler().postDelayed(
+                        this, GLOBAL_STATE_POLL_INTERVAL_MS);
+            }
+        }
+    };
+
     @GuardedBy("mConfigLock")
     private long mGlobalStateSequence;
 
@@ -179,7 +201,11 @@ public final class ApiPolicyManagerService extends SystemService {
     public void onStart() {
         LocationPolicyHooks.registerHookPoints(mLocalService);
         loadPersistedScripts();
-        SystemProperties.addChangeCallback(this::onSystemPropertiesChanged);
+        // SystemProperties.addChangeCallback() is not usable here: it only fires when the change
+        // is reported from inside this process, while PROP_DISABLE is meant to be flipped by an
+        // external `setprop`. Poll the property instead.
+        BackgroundThread.getHandler().postDelayed(
+                mGlobalStatePoller, GLOBAL_STATE_POLL_INTERVAL_MS);
         publishLocalService(ApiPolicyInternal.class, mLocalService);
         publishBinderService(SERVICE_NAME, mBinderService);
         Slog.i(TAG, "ApiPolicyManagerService started (disabled=" + isGloballyDisabled() + ")");
