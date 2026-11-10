@@ -101,7 +101,12 @@ public final class ApiPolicyEvaluator {
         final boolean active;
         try {
             active = service.isPointActiveForClient(pointId);
-        } catch (RemoteException | RuntimeException e) {
+        } catch (RemoteException e) {
+            Log.w(TAG, "isPointActive failed for " + pointId, e);
+            sService = null;
+            sActiveCache.clear();
+            return false;
+        } catch (RuntimeException e) {
             Log.w(TAG, "isPointActive failed for " + pointId, e);
             return false;
         }
@@ -112,6 +117,8 @@ public final class ApiPolicyEvaluator {
     /** Drops the cached binding state, for tests and after a service restart. */
     public static void invalidatePointActiveCache() {
         sActiveCache.clear();
+        sService = null;
+        sUnavailableUntilMs = 0L;
     }
 
     /**

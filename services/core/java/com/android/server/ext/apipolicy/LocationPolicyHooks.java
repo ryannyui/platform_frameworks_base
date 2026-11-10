@@ -528,17 +528,15 @@ public final class LocationPolicyHooks {
 
         final int star = sentence.indexOf('*');
         final String body;
-        final String given;
         if (star < 0) {
             body = sentence.substring(1);
-            given = null;
         } else {
-            // A valid sentence ends with '*' followed by exactly two checksum characters.
+            // A valid sentence ends with '*' followed by exactly two checksum characters; the
+            // checksum itself is recomputed, so only its presence has to be checked.
             if (star + 3 != sentence.length()) {
                 return null;
             }
             body = sentence.substring(1, star);
-            given = sentence.substring(star + 1);
         }
 
         // NMEA 0183 payloads are printable ASCII only; a '$' would let one replacement carry a
