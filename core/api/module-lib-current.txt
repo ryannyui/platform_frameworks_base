@@ -163,6 +163,19 @@ package android.ext {
 
 }
 
+package android.ext.apipolicy {
+
+  public final class ApiPolicyEvaluator {
+    method @NonNull public static android.os.Bundle evaluate(@NonNull String, @NonNull android.os.Bundle);
+    method @NonNull public static String getAction(@NonNull android.os.Bundle);
+    method public static boolean isDrop(@NonNull android.os.Bundle);
+    method public static boolean isModify(@NonNull android.os.Bundle);
+    method public static boolean isPointActive(@NonNull String);
+    field public static final String SERVICE_NAME = "apipolicy";
+  }
+
+}
+
 package android.ext.settings {
 
   public class CertTransparencyDownloaderSetting {

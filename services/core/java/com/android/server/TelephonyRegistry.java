@@ -1266,8 +1266,11 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                             ssToSend = rawSs.createLocationInfoSanitizedCopy(true);
                         }
                         final ServiceState filteredSs =
-                                TelephonyPolicyHooks.onServiceState(
-                                        policyCallerLocked(r), ssToSend);
+                                TelephonyPolicyHooks.isPointActive(
+                                        TelephonyPolicyHooks.POINT_SERVICE_STATE)
+                                        ? TelephonyPolicyHooks.onServiceState(
+                                                policyCallerLocked(r), ssToSend)
+                                        : ssToSend;
                         if (filteredSs != null) {
                             r.callback.onServiceStateChanged(filteredSs);
                         }
@@ -1312,10 +1315,17 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                         if (checkCoarseLocationAccess(r, Build.VERSION_CODES.BASE)
                                 && checkFineLocationAccess(r, Build.VERSION_CODES.Q)) {
                             // null will be translated to empty CellLocation object in client.
+                            final boolean[] dropped = new boolean[1];
                             final CellIdentity listenIdentity =
-                                    TelephonyPolicyHooks.onCellLocation(
-                                            policyCallerLocked(r), mCellIdentity[r.phoneId]);
-                            if (listenIdentity != null) {
+                                    TelephonyPolicyHooks.isPointActive(
+                                            TelephonyPolicyHooks.POINT_CELL_LOCATION)
+                                            ? TelephonyPolicyHooks.onCellLocation(
+                                                    policyCallerLocked(r),
+                                                    mCellIdentity[r.phoneId], dropped)
+                                            : mCellIdentity[r.phoneId];
+                            // A null identity is a valid "no location yet" value, so only an
+                            // explicit drop suppresses the callback.
+                            if (!dropped[0]) {
                                 r.callback.onCellLocationChanged(listenIdentity);
                             }
                         }
@@ -1371,8 +1381,13 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                         }
                         if (checkCoarseLocationAccess(r, Build.VERSION_CODES.BASE)
                                 && checkFineLocationAccess(r, Build.VERSION_CODES.Q)) {
-                            final List<CellInfo> listenCellInfo = TelephonyPolicyHooks.onCellInfo(
-                                    policyCallerLocked(r), mCellInfo.get(r.phoneId));
+                            final List<CellInfo> listenCellInfo =
+                                    TelephonyPolicyHooks.isPointActive(
+                                            TelephonyPolicyHooks.POINT_CELL_INFO)
+                                            ? TelephonyPolicyHooks.onCellInfo(
+                                                    policyCallerLocked(r),
+                                                    mCellInfo.get(r.phoneId))
+                                            : mCellInfo.get(r.phoneId);
                             if (listenCellInfo != null) {
                                 r.callback.onCellInfoChanged(listenCellInfo);
                             }
@@ -1928,8 +1943,11 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                                                 + " state=" + stateToSend);
                                     }
                                     final ServiceState filteredState =
-                                            TelephonyPolicyHooks.onServiceState(
-                                                    policyCallerLocked(r), stateToSend);
+                                            TelephonyPolicyHooks.isPointActive(
+                                                    TelephonyPolicyHooks.POINT_SERVICE_STATE)
+                                                    ? TelephonyPolicyHooks.onServiceState(
+                                                            policyCallerLocked(r), stateToSend)
+                                                    : stateToSend;
                                     if (filteredState != null) {
                                         r.callback.onServiceStateChanged(filteredState);
                                     }
@@ -2159,8 +2177,12 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                                 log("notifyCellInfoForSubscriber: mCellInfo=" + cellInfo
                                     + " r=" + r);
                             }
-                            final List<CellInfo> filtered = TelephonyPolicyHooks.onCellInfo(
-                                    policyCallerLocked(r), cellInfo);
+                            final List<CellInfo> filtered =
+                                    TelephonyPolicyHooks.isPointActive(
+                                            TelephonyPolicyHooks.POINT_CELL_INFO)
+                                            ? TelephonyPolicyHooks.onCellInfo(
+                                                    policyCallerLocked(r), cellInfo)
+                                            : cellInfo;
                             if (filtered != null) {
                                 r.callback.onCellInfoChanged(filtered);
                             }
@@ -2538,10 +2560,14 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                                 log("notifyCellLocation: cellIdentity=" + cellIdentity
                                         + " r=" + r);
                             }
+                            final boolean[] dropped = new boolean[1];
                             final CellIdentity filteredIdentity =
-                                    TelephonyPolicyHooks.onCellLocation(
-                                            policyCallerLocked(r), cellIdentity);
-                            if (filteredIdentity != null) {
+                                    TelephonyPolicyHooks.isPointActive(
+                                            TelephonyPolicyHooks.POINT_CELL_LOCATION)
+                                            ? TelephonyPolicyHooks.onCellLocation(
+                                                    policyCallerLocked(r), cellIdentity, dropped)
+                                            : cellIdentity;
+                            if (!dropped[0]) {
                                 r.callback.onCellLocationChanged(filteredIdentity);
                             }
                         } catch (RemoteException ex) {
@@ -4866,10 +4892,13 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
     }
 
     /**
-     * Builds the API policy caller identity for one registrant. System components are exempt
-     * inside {@link TelephonyPolicyHooks}, so this is cheap for them.
+     * Builds the API policy caller identity for one registrant.
+     *
+     * <p>Callers must check {@link TelephonyPolicyHooks#isPointActive(String)} first: resolving the
+     * location permission level allocates a query and hits {@code Settings.Secure}, and the
+     * delivery sites have already computed the same information for the permission gate.
      */
-    @Nullable
+    @NonNull
     private TelephonyPolicyHooks.Caller policyCallerLocked(Record r) {
         final String level;
         if (checkFineLocationAccess(r, Build.VERSION_CODES.Q)) {
@@ -4971,7 +5000,11 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                     ssToSend = ss.createLocationInfoSanitizedCopy(true);
                 }
                 final ServiceState filteredSs =
-                        TelephonyPolicyHooks.onServiceState(policyCallerLocked(r), ssToSend);
+                        TelephonyPolicyHooks.isPointActive(
+                                TelephonyPolicyHooks.POINT_SERVICE_STATE)
+                                ? TelephonyPolicyHooks.onServiceState(
+                                        policyCallerLocked(r), ssToSend)
+                                : ssToSend;
                 if (filteredSs != null) {
                     r.callback.onServiceStateChanged(filteredSs);
                 }
@@ -5020,8 +5053,12 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                 }
                 if (checkCoarseLocationAccess(r, Build.VERSION_CODES.BASE)
                         && checkFineLocationAccess(r, Build.VERSION_CODES.Q)) {
-                    final List<CellInfo> missCellInfo = TelephonyPolicyHooks.onCellInfo(
-                            policyCallerLocked(r), mCellInfo.get(phoneId));
+                    final List<CellInfo> missCellInfo =
+                            TelephonyPolicyHooks.isPointActive(
+                                    TelephonyPolicyHooks.POINT_CELL_INFO)
+                                    ? TelephonyPolicyHooks.onCellInfo(
+                                            policyCallerLocked(r), mCellInfo.get(phoneId))
+                                    : mCellInfo.get(phoneId);
                     if (missCellInfo != null) {
                         r.callback.onCellInfoChanged(missCellInfo);
                     }
@@ -5103,9 +5140,14 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                 if (checkCoarseLocationAccess(r, Build.VERSION_CODES.BASE)
                         && checkFineLocationAccess(r, Build.VERSION_CODES.Q)) {
                     // null will be translated to empty CellLocation object in client.
-                    final CellIdentity missIdentity = TelephonyPolicyHooks.onCellLocation(
-                            policyCallerLocked(r), mCellIdentity[phoneId]);
-                    if (missIdentity != null) {
+                    final boolean[] dropped = new boolean[1];
+                    final CellIdentity missIdentity =
+                            TelephonyPolicyHooks.isPointActive(
+                                    TelephonyPolicyHooks.POINT_CELL_LOCATION)
+                                    ? TelephonyPolicyHooks.onCellLocation(
+                                            policyCallerLocked(r), mCellIdentity[phoneId], dropped)
+                                    : mCellIdentity[phoneId];
+                    if (!dropped[0]) {
                         r.callback.onCellLocationChanged(missIdentity);
                     }
                 }

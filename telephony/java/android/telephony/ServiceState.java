@@ -2038,9 +2038,12 @@ public class ServiceState implements Parcelable {
                 if (rewritten == null || rewritten == original) {
                     continue;
                 }
+                // Builder(nri) is not a complete copy: the registered PLMN must be
+                // carried over explicitly or the rebuilt NRI reports an empty RPLMN.
                 state.mNetworkRegistrationInfos.set(i,
                         new NetworkRegistrationInfo.Builder(nri)
                                 .setCellIdentity(rewritten)
+                                .setRegisteredPlmn(nri.getRegisteredPlmn())
                                 .build());
             }
         }

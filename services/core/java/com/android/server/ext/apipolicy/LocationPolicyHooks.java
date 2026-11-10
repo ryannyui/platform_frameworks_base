@@ -446,8 +446,9 @@ public final class LocationPolicyHooks {
      * @return the sentence to deliver, or {@code null} to drop it for this listener
      */
     @Nullable
-    public static String onNmea(CallerIdentity identity, long timestamp, @Nullable String nmea) {
-        if (nmea == null || nmea.isEmpty()) {
+    public static String onNmea(@Nullable CallerIdentity identity, long timestamp,
+            @Nullable String nmea) {
+        if (identity == null || nmea == null || nmea.isEmpty()) {
             return nmea;
         }
         ApiPolicyInternal svc = null;
@@ -465,7 +466,7 @@ public final class LocationPolicyHooks {
                     .put("attribution_tag", identity.getAttributionTag())
                     .put("listener_id", identity.getListenerId())
                     .put("permission_level", "fine")
-                    .put("timestamp_ms", timestamp)
+                    .put("timestamp", timestamp)
                     .put("nmea", nmea)
                     .put("length", (long) nmea.length());
 
@@ -478,7 +479,10 @@ public final class LocationPolicyHooks {
                 return null;
             }
             if (ApiPolicyInternal.ACTION_MODIFY.equals(action)) {
-                Object raw = decision.get("nmea");
+                final Object nested = decision.get("item");
+                final Object raw = (nested instanceof ArrayMap<?, ?> fields)
+                        ? fields.get("nmea")
+                        : decision.get("nmea");
                 if (raw instanceof String replacement) {
                     String normalized = normalizeNmea(replacement);
                     if (normalized == null) {
@@ -511,23 +515,51 @@ public final class LocationPolicyHooks {
             end--;
         }
         final String sentence = candidate.substring(start, end);
-        if (sentence.isEmpty() || sentence.charAt(0) != '$'
-                || sentence.length() > MAX_NMEA_BYTES
-                || sentence.indexOf('\r') >= 0 || sentence.indexOf('\n') >= 0) {
+        if (sentence.isEmpty() || sentence.charAt(0) != '$') {
             return null;
         }
+
         final int star = sentence.indexOf('*');
+        final String body;
+        final String given;
         if (star < 0) {
-            return sentence + "*" + checksum(sentence.substring(1));
+            body = sentence.substring(1);
+            given = null;
+        } else {
+            // A valid sentence ends with '*' followed by exactly two checksum characters.
+            if (star + 3 != sentence.length()) {
+                return null;
+            }
+            body = sentence.substring(1, star);
+            given = sentence.substring(star + 1);
         }
-        // A valid sentence ends with '*' followed by exactly two checksum characters.
-        if (star + 3 != sentence.length()) {
+
+        // NMEA 0183 payloads are printable ASCII only; a '$' would let one replacement carry a
+        // second sentence. The address field ("GPGGA", "PSAMAID", ...) must be present.
+        if (body.length() < 2 || body.indexOf('$') >= 0
+                || body.indexOf('\r') >= 0 || body.indexOf('\n') >= 0) {
             return null;
         }
-        final String body = sentence.substring(1, star);
-        final String expected = checksum(body);
-        final String given = sentence.substring(star + 1);
-        return expected.equalsIgnoreCase(given) ? sentence : "$" + body + "*" + expected;
+        for (int i = 0; i < body.length(); i++) {
+            final char c = body.charAt(i);
+            if (c < 0x20 || c > 0x7E) {
+                return null;
+            }
+        }
+
+        final String checksum = checksum(body);
+        final String result = "$" + body + "*" + checksum;
+        // The framework hands NMEA to apps as a String but the HAL buffer is 120 bytes.
+        if (result.length() > MAX_NMEA_BYTES
+                || result.getBytes(java.nio.charset.StandardCharsets.UTF_8).length
+                        > MAX_NMEA_BYTES) {
+            return null;
+        }
+        if (given != null && !given.equalsIgnoreCase(checksum)) {
+            // The body is what matters; the checksum is recomputed rather than dropped.
+            return result;
+        }
+        return result;
     }
 
     private static String checksum(String body) {

@@ -1,5 +1,7 @@
 package com.android.internal.ext.apipolicy;
 
+import android.os.Bundle;
+
 import com.android.internal.ext.apipolicy.HookPointInfo;
 import com.android.internal.ext.apipolicy.IApiPolicyListener;
 import com.android.internal.ext.apipolicy.PolicyScriptInfo;
@@ -32,4 +34,9 @@ interface IApiPolicyManager {
 
     List<String> getLogs(@nullable @utf8InCpp String scriptId, int maxEntries);
     void clearLogs(@nullable @utf8InCpp String scriptId);
+
+    // --- Runtime evaluation for other system components (Bluetooth, telephony, Wi-Fi) ---
+    // Only callable by a small allowlist of system UIDs; see ApiPolicyManagerService.
+    boolean isPointActiveForClient(@utf8InCpp String pointId);
+    @nullable Bundle evaluateForClient(@utf8InCpp String pointId, in Bundle context);
 }

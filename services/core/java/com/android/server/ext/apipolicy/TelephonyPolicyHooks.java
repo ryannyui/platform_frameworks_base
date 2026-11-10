@@ -16,6 +16,7 @@
 
 package com.android.server.ext.apipolicy;
 
+import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.telephony.CellIdentity;
 import android.telephony.CellIdentityCdma;
@@ -46,9 +47,13 @@ import java.util.List;
  * Telephony hook points adapter bridging {@code TelephonyRegistry} and
  * {@link ApiPolicyInternal}.
  *
- * <p>Every hook receives one entry at a time and only ever builds a replacement copy: the cached
- * {@code TelephonyRegistry} state is never modified, so a rewrite can not leak into another caller
- * or into {@code dumpsys}.
+ * <p>The hooks cover the delivery egress inside {@code TelephonyRegistry} (the notify methods and
+ * the {@code listen()}/{@code checkPossibleMissNotify} catch-up paths). The synchronous getters
+ * served by the telephony process are not covered yet.
+ *
+ * <p>Cell info is evaluated one entry at a time, every other point receives a single object. Only
+ * replacement copies are ever built, so the cached {@code TelephonyRegistry} state is never
+ * modified and a rewrite can not leak into another caller or into {@code dumpsys}.
  */
 public final class TelephonyPolicyHooks {
 
@@ -82,6 +87,12 @@ public final class TelephonyPolicyHooks {
         return svc;
     }
 
+    /** Cheap fast path for callers that want to skip building a context. */
+    public static boolean isPointActive(String pointId) {
+        final ApiPolicyInternal svc = getService();
+        return svc != null && svc.isPointActive(pointId);
+    }
+
     static void registerHookPoints(ApiPolicyInternal service) {
         service.registerHookPoint(
                 POINT_CELL_INFO,
@@ -90,23 +101,25 @@ public final class TelephonyPolicyHooks {
         service.registerHookPoint(
                 POINT_CELL_LOCATION,
                 "telephony",
-                "Per-caller cell location delivery in TelephonyRegistry.notifyCellLocationForSubscriber");
+                "Per-caller cell location delivery in"
+                        + " TelephonyRegistry.notifyCellLocationForSubscriber");
         service.registerHookPoint(
                 POINT_SERVICE_STATE,
                 "telephony",
-                "Per-caller service state cell identity in TelephonyRegistry.notifyServiceStateForPhoneId");
+                "Per-caller service state cell identity in"
+                        + " TelephonyRegistry.notifyServiceStateForPhoneId");
     }
 
     /** Caller identity captured from a {@code TelephonyRegistry.Record}. */
     public static final class Caller {
         public final int uid;
         public final int pid;
-        public final String packageName;
+        @Nullable public final String packageName;
         @Nullable public final String featureId;
-        public final String permissionLevel;
+        @NonNull public final String permissionLevel;
 
         public Caller(int uid, int pid, @Nullable String packageName, @Nullable String featureId,
-                String permissionLevel) {
+                @NonNull String permissionLevel) {
             this.uid = uid;
             this.pid = pid;
             this.packageName = packageName;
@@ -122,7 +135,8 @@ public final class TelephonyPolicyHooks {
      * the identity. An entry that can not be rebuilt is delivered unchanged.
      */
     @Nullable
-    public static List<CellInfo> onCellInfo(@Nullable Caller caller, @Nullable List<CellInfo> infos) {
+    public static List<CellInfo> onCellInfo(@Nullable Caller caller,
+            @Nullable List<CellInfo> infos) {
         if (isExempt(caller) || infos == null || infos.isEmpty()) {
             return infos;
         }
@@ -138,8 +152,7 @@ public final class TelephonyPolicyHooks {
             boolean changed = false;
             for (int i = 0; i < size; i++) {
                 final CellInfo info = infos.get(i);
-                final Object[] ctx = buildContext(
-                        caller, POINT_CELL_INFO, size, i + 1, cellInfoToKv(info));
+                final Object[] ctx = buildContext(caller, size, i + 1, cellInfoToKv(info));
                 final ArrayMap<String, Object> decision = svc.evaluate(POINT_CELL_INFO, ctx);
                 if (decision == null) {
                     out.add(info);
@@ -151,7 +164,8 @@ public final class TelephonyPolicyHooks {
                     continue;
                 }
                 if (ApiPolicyInternal.ACTION_MODIFY.equals(action)) {
-                    final CellInfo rewritten = rewriteCellInfo(info, decision, svc, POINT_CELL_INFO);
+                    final CellInfo rewritten =
+                            rewriteCellInfo(info, decision, svc, POINT_CELL_INFO);
                     if (rewritten == null) {
                         out.add(info);
                         continue;
@@ -170,12 +184,16 @@ public final class TelephonyPolicyHooks {
     }
 
     /**
-     * Filters or rewrites the cell identity delivered by {@code getCellLocation} and
-     * {@code CellLocationListener}. Returns {@code null} to skip delivery for this caller.
+     * Filters or rewrites the cell identity delivered by {@code CellLocationListener}.
+     *
+     * @param droppedOut set to {@code true} when the script explicitly dropped the callback; a
+     *     {@code null} return with {@code false} means "no identity yet" and must still be
+     *     delivered
      */
     @Nullable
     public static CellIdentity onCellLocation(@Nullable Caller caller,
-            @Nullable CellIdentity identity) {
+            @Nullable CellIdentity identity, @NonNull boolean[] droppedOut) {
+        droppedOut[0] = false;
         if (isExempt(caller) || identity == null) {
             return identity;
         }
@@ -185,14 +203,14 @@ public final class TelephonyPolicyHooks {
             if (svc == null || !svc.isPointActive(POINT_CELL_LOCATION)) {
                 return identity;
             }
-            final Object[] ctx = buildContext(
-                    caller, POINT_CELL_LOCATION, 1, 1, cellIdentityToKv(identity));
+            final Object[] ctx = buildContext(caller, 1, 1, cellIdentityToKv(identity));
             final ArrayMap<String, Object> decision = svc.evaluate(POINT_CELL_LOCATION, ctx);
             if (decision == null) {
                 return identity;
             }
             final String action = getAction(decision);
             if (ApiPolicyInternal.ACTION_DROP.equals(action)) {
+                droppedOut[0] = true;
                 return null;
             }
             if (ApiPolicyInternal.ACTION_MODIFY.equals(action)) {
@@ -211,8 +229,9 @@ public final class TelephonyPolicyHooks {
      * Applies the cell identity policy to every network registration info of one service state
      * copy.
      *
-     * <p>{@code drop} strips the identity down to MCC/MNC (the caller still receives a valid
-     * state); {@code modify} merges the returned fields.
+     * <p>{@code drop} removes every identifying field of the cell identity while keeping the RAT
+     * type (the caller still receives a valid state); {@code modify} merges the returned
+     * fields.
      */
     @Nullable
     public static ServiceState onServiceState(@Nullable Caller caller,
@@ -228,8 +247,7 @@ public final class TelephonyPolicyHooks {
             }
             final ApiPolicyInternal service = svc;
             return state.createCellIdentityRewrittenCopy(identity -> {
-                final Object[] ctx = buildContext(
-                        caller, POINT_SERVICE_STATE, 1, 1, cellIdentityToKv(identity));
+                final Object[] ctx = buildContext(caller, 1, 1, cellIdentityToKv(identity));
                 final ArrayMap<String, Object> decision =
                         service.evaluate(POINT_SERVICE_STATE, ctx);
                 if (decision == null) {
@@ -250,8 +268,7 @@ public final class TelephonyPolicyHooks {
         }
     }
 
-    private static Object[] buildContext(Caller caller, String pointId, int count, int index,
-            Object[] item) {
+    private static Object[] buildContext(Caller caller, int count, int index, Object[] item) {
         return new PolicyScriptEngine.KvBuilder(9)
                 .put("uid", (long) caller.uid)
                 .put("pid", (long) caller.pid)
@@ -367,7 +384,7 @@ public final class TelephonyPolicyHooks {
 
         abstract CellIdentity build(ArrayMap<?, ?> fields, CellIdentity original);
 
-        /** Drops every identifying field, keeping only the RAT type. */
+        /** Removes every identifying field (PLMN, area/identity, CSG, bands), keeping the type. */
         abstract CellIdentity strip(CellIdentity original);
 
         @Nullable
@@ -412,11 +429,6 @@ public final class TelephonyPolicyHooks {
                 return n.longValue();
             }
             return fallback;
-        }
-
-        static boolean bool(ArrayMap<?, ?> map, String key, boolean fallback) {
-            final Object raw = map.get(key);
-            return (raw instanceof Boolean b) ? b : fallback;
         }
 
         static Collection<String> gsmPlmns(CellIdentity identity) {
@@ -616,15 +628,10 @@ public final class TelephonyPolicyHooks {
 
         @Override
         CellIdentity build(ArrayMap<?, ?> f, CellIdentity original) {
-            final CellIdentityCdma c = (CellIdentityCdma) original;
-            return new CellIdentityCdma(
-                    num(f, "nid", c.getNetworkId()),
-                    num(f, "sid", c.getSystemId()),
-                    num(f, "bid", c.getBasestationId()),
-                    num(f, "longitude", c.getLongitude()),
-                    num(f, "latitude", c.getLatitude()),
-                    alphaLong(c),
-                    alphaShort(c));
+            // CellIdentityCdma's public constructor ignores every argument and produces an
+            // all-UNAVAILABLE identity, so a rewrite is not representable. Fail open instead of
+            // silently blanking the identity.
+            return null;
         }
 
         @Override
@@ -685,7 +692,7 @@ public final class TelephonyPolicyHooks {
         return (v == null) ? null : v.toString();
     }
 
-    /** Keeps only MCC/MNC; used when a script drops the cell identity. */
+    /** Removes every identifying field of the identity; used when a script drops it. */
     @Nullable
     private static CellIdentity stripToPlmn(CellIdentity identity) {
         final Schema schema = Schema.of(identity);

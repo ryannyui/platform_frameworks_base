@@ -1,9 +1,11 @@
 package com.android.server.ext.apipolicy;
 
 import android.Manifest;
+import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
 import android.os.Binder;
+import android.os.Bundle;
 import android.os.Build;
 import android.os.Process;
 import android.os.RemoteCallbackList;
@@ -201,6 +203,7 @@ public final class ApiPolicyManagerService extends SystemService {
     public void onStart() {
         LocationPolicyHooks.registerHookPoints(mLocalService);
         TelephonyPolicyHooks.registerHookPoints(mLocalService);
+        registerRemoteHookPoints();
         loadPersistedScripts();
         // SystemProperties.addChangeCallback() is not usable here: it only fires when the change
         // is reported from inside this process, while PROP_DISABLE is meant to be flipped by an
@@ -210,6 +213,21 @@ public final class ApiPolicyManagerService extends SystemService {
         publishLocalService(ApiPolicyInternal.class, mLocalService);
         publishBinderService(SERVICE_NAME, mBinderService);
         Slog.i(TAG, "ApiPolicyManagerService started (disabled=" + isGloballyDisabled() + ")");
+    }
+
+    /**
+     * Hook points implemented by components outside system_server (Wi-Fi, Bluetooth). They are
+     * registered here so they show up in the CLI, the management app and the script validation.
+     */
+    private void registerRemoteHookPoints() {
+        mLocalService.registerHookPoint("wifi.scan_results", "wifi",
+                "Per-caller WLAN scan results in WifiServiceImpl.getScanResults");
+        mLocalService.registerHookPoint("wifi.connection_info", "wifi",
+                "Per-caller WifiInfo in WifiServiceImpl.getConnectionInfo");
+        mLocalService.registerHookPoint("wifi.rtt_results", "wifi",
+                "Per-caller 802.11mc ranging results in RttServiceImpl");
+        mLocalService.registerHookPoint("bluetooth.le_scan_result", "bluetooth",
+                "Per-caller BLE scan results in ScanController");
     }
 
     static boolean isGloballyDisabled() {
@@ -551,6 +569,69 @@ public final class ApiPolicyManagerService extends SystemService {
             }
             mLogs.addLast(new LogEntry(now, scriptId, message));
         }
+    }
+
+    /**
+     * Only system components may evaluate policy for objects they are about to hand to an app.
+     * The identity asserted in the context is trusted because these are platform components.
+     */
+    private void enforcePolicyClient() {
+        final int uid = Binder.getCallingUid();
+        if (uid == Process.SYSTEM_UID
+                || uid == Process.PHONE_UID
+                || uid == Process.BLUETOOTH_UID) {
+            return;
+        }
+        throw new SecurityException("UID " + uid + " may not evaluate API policy");
+    }
+
+    private static Object[] bundleToFlatKv(@Nullable Bundle bundle) {
+        if (bundle == null || bundle.isEmpty()) {
+            return null;
+        }
+        final ArrayList<Object> items = new ArrayList<>(bundle.size() * 2);
+        for (String key : bundle.keySet()) {
+            final Object value = bundle.get(key);
+            if (key == null || value == null) {
+                continue;
+            }
+            items.add(key);
+            if (value instanceof Bundle nested) {
+                items.add(bundleToFlatKv(nested));
+            } else if (value instanceof String || value instanceof Boolean
+                    || value instanceof Integer || value instanceof Long
+                    || value instanceof Double || value instanceof Float) {
+                items.add(value);
+            }
+            // Unsupported types are dropped: the JNI bridge only understands the ones above.
+        }
+        return items.toArray();
+    }
+
+    private static Bundle flatKvToBundle(@NonNull ArrayMap<String, Object> map) {
+        final Bundle bundle = new Bundle(map.size());
+        for (int i = 0; i < map.size(); i++) {
+            final String key = map.keyAt(i);
+            final Object value = map.valueAt(i);
+            if (value instanceof String v) {
+                bundle.putString(key, v);
+            } else if (value instanceof Boolean v) {
+                bundle.putBoolean(key, v);
+            } else if (value instanceof Integer v) {
+                bundle.putInt(key, v);
+            } else if (value instanceof Long v) {
+                bundle.putLong(key, v);
+            } else if (value instanceof Double v) {
+                bundle.putDouble(key, v);
+            } else if (value instanceof Float v) {
+                bundle.putFloat(key, v);
+            } else if (value instanceof ArrayMap<?, ?> nested) {
+                @SuppressWarnings("unchecked")
+                final ArrayMap<String, Object> typedNested = (ArrayMap<String, Object>) nested;
+                bundle.putBundle(key, flatKvToBundle(typedNested));
+            }
+        }
+        return bundle;
     }
 
     private void enforceManagePermission() {
@@ -1195,6 +1276,21 @@ public final class ApiPolicyManagerService extends SystemService {
             } finally {
                 Binder.restoreCallingIdentity(token);
             }
+        }
+
+        @Override
+        public boolean isPointActiveForClient(String pointId) {
+            enforcePolicyClient();
+            return mLocalService.isPointActive(pointId);
+        }
+
+        @Override
+        @Nullable
+        public Bundle evaluateForClient(String pointId, Bundle context) {
+            enforcePolicyClient();
+            final Object[] flatKv = bundleToFlatKv(context);
+            final ArrayMap<String, Object> decision = mLocalService.evaluate(pointId, flatKv);
+            return (decision == null) ? null : flatKvToBundle(decision);
         }
 
         @Override

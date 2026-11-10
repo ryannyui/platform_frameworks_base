@@ -26,8 +26,8 @@ import android.location.util.identity.CallerIdentity;
 import android.util.Log;
 
 import com.android.internal.listeners.ListenerExecutor;
-import com.android.server.location.gnss.hal.GnssNative;
 import com.android.server.ext.apipolicy.LocationPolicyHooks;
+import com.android.server.location.gnss.hal.GnssNative;
 import com.android.server.location.injector.AppOpsHelper;
 import com.android.server.location.injector.Injector;
 
