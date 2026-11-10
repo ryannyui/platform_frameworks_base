@@ -43,6 +43,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
 /**
@@ -2010,6 +2011,39 @@ public class ServiceState implements Parcelable {
         state.mOperatorAlphaShort = null;
         state.mOperatorNumeric = null;
 
+        return state;
+    }
+
+    /**
+     * Returns a copy of this state with the {@link CellIdentity} of every
+     * {@link NetworkRegistrationInfo} replaced by {@code rewriter.apply(original)}.
+     *
+     * <p>A {@code null} result keeps the original identity. This is used by runtime API policy
+     * hooks to hand one caller a rewritten identity without touching the cached state.
+     *
+     * @hide
+     */
+    @NonNull
+    public ServiceState createCellIdentityRewrittenCopy(
+            @NonNull UnaryOperator<CellIdentity> rewriter) {
+        ServiceState state = new ServiceState(this);
+        synchronized (state.mNetworkRegistrationInfos) {
+            for (int i = 0; i < state.mNetworkRegistrationInfos.size(); i++) {
+                NetworkRegistrationInfo nri = state.mNetworkRegistrationInfos.get(i);
+                CellIdentity original = nri.getCellIdentity();
+                if (original == null) {
+                    continue;
+                }
+                CellIdentity rewritten = rewriter.apply(original);
+                if (rewritten == null || rewritten == original) {
+                    continue;
+                }
+                state.mNetworkRegistrationInfos.set(i,
+                        new NetworkRegistrationInfo.Builder(nri)
+                                .setCellIdentity(rewritten)
+                                .build());
+            }
+        }
         return state;
     }
 

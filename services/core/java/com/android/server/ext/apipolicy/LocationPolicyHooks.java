@@ -35,6 +35,7 @@ public final class LocationPolicyHooks {
     public static final String POINT_ON_PROVIDER_TICK = "location.on_provider_tick";
     public static final String POINT_DELIVER_LOCATION = "location.deliver_location";
     public static final String POINT_GET_LAST_LOCATION = "location.get_last_location";
+    public static final String POINT_ON_NMEA = "location.on_nmea";
 
     private static final long MIN_TICK_DELAY_MS = 200L;
     private static final long DEFAULT_ZERO_INTERVAL_TICK_MS = 1000L;
@@ -89,6 +90,10 @@ public final class LocationPolicyHooks {
                 POINT_GET_LAST_LOCATION,
                 "location",
                 "Per-caller sync cache pull in LocationProviderManager.getLastLocation");
+        service.registerHookPoint(
+                POINT_ON_NMEA,
+                "location",
+                "Per-caller GNSS NMEA sentence delivery in GnssNmeaProvider");
     }
 
     /**
@@ -431,6 +436,106 @@ public final class LocationPolicyHooks {
             safeRecordUnexpectedError(svc, POINT_GET_LAST_LOCATION, t);
             return original;
         }
+    }
+
+    private static final int MAX_NMEA_BYTES = 120;
+
+    /**
+     * Filters or rewrites one GNSS NMEA sentence for one listener.
+     *
+     * @return the sentence to deliver, or {@code null} to drop it for this listener
+     */
+    @Nullable
+    public static String onNmea(CallerIdentity identity, long timestamp, @Nullable String nmea) {
+        if (nmea == null || nmea.isEmpty()) {
+            return nmea;
+        }
+        ApiPolicyInternal svc = null;
+        try {
+            svc = getService();
+            if (svc == null || !svc.isPointActive(POINT_ON_NMEA)) {
+                return nmea;
+            }
+
+            PolicyScriptEngine.KvBuilder builder = new PolicyScriptEngine.KvBuilder(11)
+                    .put("uid", (long) identity.getUid())
+                    .put("pid", (long) identity.getPid())
+                    .put("user_id", (long) identity.getUserId())
+                    .put("package_name", identity.getPackageName())
+                    .put("attribution_tag", identity.getAttributionTag())
+                    .put("listener_id", identity.getListenerId())
+                    .put("permission_level", "fine")
+                    .put("timestamp_ms", timestamp)
+                    .put("nmea", nmea)
+                    .put("length", (long) nmea.length());
+
+            ArrayMap<String, Object> decision = svc.evaluate(POINT_ON_NMEA, builder.build());
+            if (decision == null) {
+                return nmea;
+            }
+            String action = getAction(decision);
+            if (ApiPolicyInternal.ACTION_DROP.equals(action)) {
+                return null;
+            }
+            if (ApiPolicyInternal.ACTION_MODIFY.equals(action)) {
+                Object raw = decision.get("nmea");
+                if (raw instanceof String replacement) {
+                    String normalized = normalizeNmea(replacement);
+                    if (normalized == null) {
+                        svc.recordHookError(POINT_ON_NMEA, null,
+                                "Rejected an invalid NMEA replacement sentence");
+                        return null;
+                    }
+                    return normalized;
+                }
+            }
+            return nmea;
+        } catch (Throwable t) {
+            safeRecordUnexpectedError(svc, POINT_ON_NMEA, t);
+            return nmea;
+        }
+    }
+
+    /**
+     * Accepts an NMEA 0183 sentence, trims transport terminators, enforces the framework's
+     * 120-byte limit, and repairs a missing or wrong {@code *hh} checksum.
+     */
+    @Nullable
+    private static String normalizeNmea(String candidate) {
+        int start = 0;
+        int end = candidate.length();
+        while (start < end && Character.isWhitespace(candidate.charAt(start))) {
+            start++;
+        }
+        while (end > start && Character.isWhitespace(candidate.charAt(end - 1))) {
+            end--;
+        }
+        final String sentence = candidate.substring(start, end);
+        if (sentence.isEmpty() || sentence.charAt(0) != '$'
+                || sentence.length() > MAX_NMEA_BYTES
+                || sentence.indexOf('\r') >= 0 || sentence.indexOf('\n') >= 0) {
+            return null;
+        }
+        final int star = sentence.indexOf('*');
+        if (star < 0) {
+            return sentence + "*" + checksum(sentence.substring(1));
+        }
+        // A valid sentence ends with '*' followed by exactly two checksum characters.
+        if (star + 3 != sentence.length()) {
+            return null;
+        }
+        final String body = sentence.substring(1, star);
+        final String expected = checksum(body);
+        final String given = sentence.substring(star + 1);
+        return expected.equalsIgnoreCase(given) ? sentence : "$" + body + "*" + expected;
+    }
+
+    private static String checksum(String body) {
+        int sum = 0;
+        for (int i = 0; i < body.length(); i++) {
+            sum ^= body.charAt(i);
+        }
+        return String.format(java.util.Locale.US, "%02X", sum & 0xFF);
     }
 
     private static void safeRecordUnexpectedError(

@@ -116,6 +116,7 @@ import com.android.internal.util.DumpUtils;
 import com.android.internal.util.FrameworkStatsLog;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.server.am.BatteryStatsService;
+import com.android.server.ext.apipolicy.TelephonyPolicyHooks;
 
 import dalvik.annotation.optimization.NeverCompile;
 
@@ -1256,14 +1257,19 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                     try {
                         if (VDBG) log("listen: call onSSC state=" + mServiceState[r.phoneId]);
                         ServiceState rawSs = new ServiceState(mServiceState[r.phoneId]);
+                        final ServiceState ssToSend;
                         if (checkFineLocationAccess(r, Build.VERSION_CODES.Q)) {
-                            r.callback.onServiceStateChanged(rawSs);
+                            ssToSend = rawSs;
                         } else if (checkCoarseLocationAccess(r, Build.VERSION_CODES.Q)) {
-                            r.callback.onServiceStateChanged(
-                                    rawSs.createLocationInfoSanitizedCopy(false));
+                            ssToSend = rawSs.createLocationInfoSanitizedCopy(false);
                         } else {
-                            r.callback.onServiceStateChanged(
-                                    rawSs.createLocationInfoSanitizedCopy(true));
+                            ssToSend = rawSs.createLocationInfoSanitizedCopy(true);
+                        }
+                        final ServiceState filteredSs =
+                                TelephonyPolicyHooks.onServiceState(
+                                        policyCallerLocked(r), ssToSend);
+                        if (filteredSs != null) {
+                            r.callback.onServiceStateChanged(filteredSs);
                         }
                     } catch (RemoteException ex) {
                         remove(r.binder);
@@ -1306,7 +1312,12 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                         if (checkCoarseLocationAccess(r, Build.VERSION_CODES.BASE)
                                 && checkFineLocationAccess(r, Build.VERSION_CODES.Q)) {
                             // null will be translated to empty CellLocation object in client.
-                            r.callback.onCellLocationChanged(mCellIdentity[r.phoneId]);
+                            final CellIdentity listenIdentity =
+                                    TelephonyPolicyHooks.onCellLocation(
+                                            policyCallerLocked(r), mCellIdentity[r.phoneId]);
+                            if (listenIdentity != null) {
+                                r.callback.onCellLocationChanged(listenIdentity);
+                            }
                         }
                     } catch (RemoteException ex) {
                         remove(r.binder);
@@ -1360,7 +1371,11 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                         }
                         if (checkCoarseLocationAccess(r, Build.VERSION_CODES.BASE)
                                 && checkFineLocationAccess(r, Build.VERSION_CODES.Q)) {
-                            r.callback.onCellInfoChanged(mCellInfo.get(r.phoneId));
+                            final List<CellInfo> listenCellInfo = TelephonyPolicyHooks.onCellInfo(
+                                    policyCallerLocked(r), mCellInfo.get(r.phoneId));
+                            if (listenCellInfo != null) {
+                                r.callback.onCellInfoChanged(listenCellInfo);
+                            }
                         }
                     } catch (RemoteException ex) {
                         remove(r.binder);
@@ -1912,7 +1927,12 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                                                 + " subId=" + subId + " phoneId=" + phoneId
                                                 + " state=" + stateToSend);
                                     }
-                                    r.callback.onServiceStateChanged(stateToSend);
+                                    final ServiceState filteredState =
+                                            TelephonyPolicyHooks.onServiceState(
+                                                    policyCallerLocked(r), stateToSend);
+                                    if (filteredState != null) {
+                                        r.callback.onServiceStateChanged(filteredState);
+                                    }
                                 } catch (RemoteException ex) {
                                     mRemoveList.add(r.binder);
                                 }
@@ -2139,7 +2159,11 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                                 log("notifyCellInfoForSubscriber: mCellInfo=" + cellInfo
                                     + " r=" + r);
                             }
-                            r.callback.onCellInfoChanged(cellInfo);
+                            final List<CellInfo> filtered = TelephonyPolicyHooks.onCellInfo(
+                                    policyCallerLocked(r), cellInfo);
+                            if (filtered != null) {
+                                r.callback.onCellInfoChanged(filtered);
+                            }
                         } catch (RemoteException ex) {
                             mRemoveList.add(r.binder);
                         }
@@ -2514,7 +2538,12 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                                 log("notifyCellLocation: cellIdentity=" + cellIdentity
                                         + " r=" + r);
                             }
-                            r.callback.onCellLocationChanged(cellIdentity);
+                            final CellIdentity filteredIdentity =
+                                    TelephonyPolicyHooks.onCellLocation(
+                                            policyCallerLocked(r), cellIdentity);
+                            if (filteredIdentity != null) {
+                                r.callback.onCellLocationChanged(filteredIdentity);
+                            }
                         } catch (RemoteException ex) {
                             mRemoveList.add(r.binder);
                         }
@@ -4836,6 +4865,24 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
         }
     }
 
+    /**
+     * Builds the API policy caller identity for one registrant. System components are exempt
+     * inside {@link TelephonyPolicyHooks}, so this is cheap for them.
+     */
+    @Nullable
+    private TelephonyPolicyHooks.Caller policyCallerLocked(Record r) {
+        final String level;
+        if (checkFineLocationAccess(r, Build.VERSION_CODES.Q)) {
+            level = "fine";
+        } else if (checkCoarseLocationAccess(r, Build.VERSION_CODES.Q)) {
+            level = "coarse";
+        } else {
+            level = "none";
+        }
+        return new TelephonyPolicyHooks.Caller(
+                r.callerUid, r.callerPid, r.callingPackage, r.callingFeatureId, level);
+    }
+
     private boolean checkFineLocationAccess(Record r) {
         return checkFineLocationAccess(r, Build.VERSION_CODES.BASE);
     }
@@ -4915,14 +4962,18 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                 if (VDBG) log("checkPossibleMissNotify: onServiceStateChanged state=" +
                         mServiceState[phoneId]);
                 ServiceState ss = new ServiceState(mServiceState[phoneId]);
+                final ServiceState ssToSend;
                 if (checkFineLocationAccess(r, Build.VERSION_CODES.Q)) {
-                    r.callback.onServiceStateChanged(ss);
+                    ssToSend = ss;
                 } else if (checkCoarseLocationAccess(r, Build.VERSION_CODES.Q)) {
-                    r.callback.onServiceStateChanged(
-                            ss.createLocationInfoSanitizedCopy(false));
+                    ssToSend = ss.createLocationInfoSanitizedCopy(false);
                 } else {
-                    r.callback.onServiceStateChanged(
-                            ss.createLocationInfoSanitizedCopy(true));
+                    ssToSend = ss.createLocationInfoSanitizedCopy(true);
+                }
+                final ServiceState filteredSs =
+                        TelephonyPolicyHooks.onServiceState(policyCallerLocked(r), ssToSend);
+                if (filteredSs != null) {
+                    r.callback.onServiceStateChanged(filteredSs);
                 }
             } catch (RemoteException ex) {
                 mRemoveList.add(r.binder);
@@ -4969,7 +5020,11 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                 }
                 if (checkCoarseLocationAccess(r, Build.VERSION_CODES.BASE)
                         && checkFineLocationAccess(r, Build.VERSION_CODES.Q)) {
-                    r.callback.onCellInfoChanged(mCellInfo.get(phoneId));
+                    final List<CellInfo> missCellInfo = TelephonyPolicyHooks.onCellInfo(
+                            policyCallerLocked(r), mCellInfo.get(phoneId));
+                    if (missCellInfo != null) {
+                        r.callback.onCellInfoChanged(missCellInfo);
+                    }
                 }
             } catch (RemoteException ex) {
                 mRemoveList.add(r.binder);
@@ -5048,7 +5103,11 @@ public class TelephonyRegistry extends ITelephonyRegistry.Stub {
                 if (checkCoarseLocationAccess(r, Build.VERSION_CODES.BASE)
                         && checkFineLocationAccess(r, Build.VERSION_CODES.Q)) {
                     // null will be translated to empty CellLocation object in client.
-                    r.callback.onCellLocationChanged(mCellIdentity[phoneId]);
+                    final CellIdentity missIdentity = TelephonyPolicyHooks.onCellLocation(
+                            policyCallerLocked(r), mCellIdentity[phoneId]);
+                    if (missIdentity != null) {
+                        r.callback.onCellLocationChanged(missIdentity);
+                    }
                 }
             } catch (RemoteException ex) {
                 mRemoveList.add(r.binder);

@@ -200,6 +200,7 @@ public final class ApiPolicyManagerService extends SystemService {
     @Override
     public void onStart() {
         LocationPolicyHooks.registerHookPoints(mLocalService);
+        TelephonyPolicyHooks.registerHookPoints(mLocalService);
         loadPersistedScripts();
         // SystemProperties.addChangeCallback() is not usable here: it only fires when the change
         // is reported from inside this process, while PROP_DISABLE is meant to be flipped by an

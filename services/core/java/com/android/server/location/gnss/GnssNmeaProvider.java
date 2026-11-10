@@ -27,6 +27,7 @@ import android.util.Log;
 
 import com.android.internal.listeners.ListenerExecutor;
 import com.android.server.location.gnss.hal.GnssNative;
+import com.android.server.ext.apipolicy.LocationPolicyHooks;
 import com.android.server.location.injector.AppOpsHelper;
 import com.android.server.location.injector.Injector;
 
@@ -109,7 +110,11 @@ class GnssNmeaProvider extends GnssListenerMultiplexer<Void, IGnssNmeaListener, 
                                         mNmeaBuffer.length);
                                 mNmea = new String(mNmeaBuffer, 0, length);
                             }
-                            return listener -> listener.onNmeaReceived(timestamp, mNmea);
+                            final String delivered = LocationPolicyHooks.onNmea(
+                                    registration.getIdentity(), timestamp, mNmea);
+                            return (delivered == null)
+                                    ? null
+                                    : listener -> listener.onNmeaReceived(timestamp, delivered);
                         } else {
                             return null;
                         }
