@@ -47,9 +47,11 @@ import java.util.List;
  * Telephony hook points adapter bridging {@code TelephonyRegistry} and
  * {@link ApiPolicyInternal}.
  *
- * <p>The hooks cover the delivery egress inside {@code TelephonyRegistry} (the notify methods and
- * the {@code listen()}/{@code checkPossibleMissNotify} catch-up paths). The synchronous getters
- * served by the telephony process are not covered yet.
+ * <p>The hooks cover the delivery egress inside {@code TelephonyRegistry}: the notify methods and
+ * the {@code listen()}/{@code checkPossibleMissNotify} catch-up paths. The synchronous getters
+ * served by the telephony process are filtered by
+ * {@code com.android.phone.TelephonySyncPolicyHooks}, which evaluates the same point ids (drop
+ * only).
  *
  * <p>Cell info is evaluated one entry at a time, every other point receives a single object. Only
  * replacement copies are ever built, so the cached {@code TelephonyRegistry} state is never
@@ -692,7 +694,7 @@ public final class TelephonyPolicyHooks {
         return (v == null) ? null : v.toString();
     }
 
-    /** Removes every identifying field of the identity; used when a script drops it. */
+    /** Removes the identity fields (PLMN, area, CSG); used when a script drops it. */
     @Nullable
     private static CellIdentity stripToPlmn(CellIdentity identity) {
         final Schema schema = Schema.of(identity);

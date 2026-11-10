@@ -56,8 +56,28 @@ public final class ApiPolicyEvaluator {
     private static final String ACTION_DROP = "drop";
     private static final String ACTION_MODIFY = "modify";
 
+    /**
+     * Bindings can only change when a script is applied, enabled, disabled or removed, all of
+     * which are rare. A short TTL keeps the hot delivery path free of binder calls without
+     * needing a push channel.
+     */
+    private static final long POINT_ACTIVE_TTL_MS = 500L;
+
+    private static final class ActiveCacheEntry {
+        final boolean active;
+        final long expiresAtMs;
+
+        ActiveCacheEntry(boolean active, long expiresAtMs) {
+            this.active = active;
+            this.expiresAtMs = expiresAtMs;
+        }
+    }
+
+    private static final java.util.concurrent.ConcurrentHashMap<String, ActiveCacheEntry>
+            sActiveCache = new java.util.concurrent.ConcurrentHashMap<>();
+
     private static volatile IApiPolicyManager sService;
-    private static volatile boolean sUnavailable;
+    private static volatile long sUnavailableUntilMs;
 
     private ApiPolicyEvaluator() {}
 
@@ -69,16 +89,29 @@ public final class ApiPolicyEvaluator {
      * change notification.
      */
     public static boolean isPointActive(@NonNull String pointId) {
+        final long now = android.os.SystemClock.elapsedRealtime();
+        final ActiveCacheEntry cached = sActiveCache.get(pointId);
+        if (cached != null && cached.expiresAtMs > now) {
+            return cached.active;
+        }
         final IApiPolicyManager service = getService();
         if (service == null) {
             return false;
         }
+        final boolean active;
         try {
-            return service.isPointActiveForClient(pointId);
+            active = service.isPointActiveForClient(pointId);
         } catch (RemoteException | RuntimeException e) {
             Log.w(TAG, "isPointActive failed for " + pointId, e);
             return false;
         }
+        sActiveCache.put(pointId, new ActiveCacheEntry(active, now + POINT_ACTIVE_TTL_MS));
+        return active;
+    }
+
+    /** Drops the cached binding state, for tests and after a service restart. */
+    public static void invalidatePointActiveCache() {
+        sActiveCache.clear();
     }
 
     /**
@@ -96,7 +129,12 @@ public final class ApiPolicyEvaluator {
         try {
             final Bundle decision = service.evaluateForClient(pointId, context);
             return (decision != null) ? decision : Bundle.EMPTY;
-        } catch (RemoteException | RuntimeException e) {
+        } catch (RemoteException e) {
+            Log.w(TAG, "evaluate failed for " + pointId, e);
+            sService = null;
+            sActiveCache.clear();
+            return Bundle.EMPTY;
+        } catch (RuntimeException e) {
             Log.w(TAG, "evaluate failed for " + pointId, e);
             return Bundle.EMPTY;
         }
@@ -125,16 +163,17 @@ public final class ApiPolicyEvaluator {
         if (service != null) {
             return service;
         }
-        if (sUnavailable) {
+        if (sUnavailableUntilMs > android.os.SystemClock.elapsedRealtime()) {
             return null;
         }
         synchronized (ApiPolicyEvaluator.class) {
             service = sService;
-            if (service == null && !sUnavailable) {
+            if (service == null && sUnavailableUntilMs
+                    <= android.os.SystemClock.elapsedRealtime()) {
                 final IBinder binder = ServiceManager.getService(SERVICE_NAME);
                 if (binder == null) {
-                    // The policy service is not running (or this build does not ship it).
-                    sUnavailable = true;
+                    // The policy service is not published yet (or not shipped); retry later.
+                    sUnavailableUntilMs = android.os.SystemClock.elapsedRealtime() + 5_000L;
                     return null;
                 }
                 service = IApiPolicyManager.Stub.asInterface(binder);

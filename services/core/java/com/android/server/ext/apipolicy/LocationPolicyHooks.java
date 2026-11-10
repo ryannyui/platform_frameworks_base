@@ -16,6 +16,7 @@ import com.android.server.LocalServices;
 import com.android.server.location.LocationPermissions.PermissionLevel;
 
 import java.lang.ref.WeakReference;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.Set;
@@ -468,7 +469,13 @@ public final class LocationPolicyHooks {
                     .put("permission_level", "fine")
                     .put("timestamp", timestamp)
                     .put("nmea", nmea)
-                    .put("length", (long) nmea.length());
+                    .put("length", (long) nmea.length())
+                    // Same shape as the other points: the object lives under "item", with the
+                    // top-level copy kept for scripts written against the first revision.
+                    .put("item", new PolicyScriptEngine.KvBuilder(2)
+                            .put("nmea", nmea)
+                            .put("length", (long) nmea.length())
+                            .build());
 
             ArrayMap<String, Object> decision = svc.evaluate(POINT_ON_NMEA, builder.build());
             if (decision == null) {
@@ -551,14 +558,12 @@ public final class LocationPolicyHooks {
         final String result = "$" + body + "*" + checksum;
         // The framework hands NMEA to apps as a String but the HAL buffer is 120 bytes.
         if (result.length() > MAX_NMEA_BYTES
-                || result.getBytes(java.nio.charset.StandardCharsets.UTF_8).length
+                || result.getBytes(StandardCharsets.UTF_8).length
                         > MAX_NMEA_BYTES) {
             return null;
         }
-        if (given != null && !given.equalsIgnoreCase(checksum)) {
-            // The body is what matters; the checksum is recomputed rather than dropped.
-            return result;
-        }
+        // The body is what matters: a wrong checksum is recomputed rather than rejected, and an
+        // already correct one is kept as is.
         return result;
     }
 
@@ -701,7 +706,7 @@ public final class LocationPolicyHooks {
         }
 
         // Clone original if present; otherwise create a blank Location with NO implicit timestamps
-        // or extras — every required field (time_ms, elapsed_ns, accuracy, lat/lon) must be
+        // or extras - every required field (time_ms, elapsed_ns, accuracy, lat/lon) must be
         // explicitly provided by the user's Lua script.
         Location out = (original != null) ? new Location(original) : new Location(defaultProvider);
 

@@ -228,6 +228,8 @@ public final class ApiPolicyManagerService extends SystemService {
                 "Per-caller 802.11mc ranging results in RttServiceImpl");
         mLocalService.registerHookPoint("bluetooth.le_scan_result", "bluetooth",
                 "Per-caller BLE scan results in ScanController");
+        mLocalService.registerHookPoint("telephony.signal_strength", "telephony",
+                "Per-caller signal strength answers in PhoneInterfaceManager");
     }
 
     static boolean isGloballyDisabled() {
@@ -591,19 +593,24 @@ public final class ApiPolicyManagerService extends SystemService {
         }
         final ArrayList<Object> items = new ArrayList<>(bundle.size() * 2);
         for (String key : bundle.keySet()) {
-            final Object value = bundle.get(key);
-            if (key == null || value == null) {
+            if (key == null) {
                 continue;
             }
-            items.add(key);
+            final Object value = bundle.get(key);
+            // Only append the key once the value is known to be convertible; otherwise the
+            // alternating array would be misaligned and the JNI bridge would see shifted pairs.
+            final Object converted;
             if (value instanceof Bundle nested) {
-                items.add(bundleToFlatKv(nested));
+                converted = bundleToFlatKv(nested);
             } else if (value instanceof String || value instanceof Boolean
                     || value instanceof Integer || value instanceof Long
                     || value instanceof Double || value instanceof Float) {
-                items.add(value);
+                converted = value;
+            } else {
+                continue;
             }
-            // Unsupported types are dropped: the JNI bridge only understands the ones above.
+            items.add(key);
+            items.add(converted);
         }
         return items.toArray();
     }

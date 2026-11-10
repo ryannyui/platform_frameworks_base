@@ -168,6 +168,7 @@ package android.ext.apipolicy {
   public final class ApiPolicyEvaluator {
     method @NonNull public static android.os.Bundle evaluate(@NonNull String, @NonNull android.os.Bundle);
     method @NonNull public static String getAction(@NonNull android.os.Bundle);
+    method public static void invalidatePointActiveCache();
     method public static boolean isDrop(@NonNull android.os.Bundle);
     method public static boolean isModify(@NonNull android.os.Bundle);
     method public static boolean isPointActive(@NonNull String);
