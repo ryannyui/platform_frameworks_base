@@ -84,9 +84,8 @@ public final class ApiPolicyEvaluator {
     /**
      * Returns {@code true} when at least one enabled script binds {@code pointId}.
      *
-     * <p>Cheap enough to call on every delivery: the result is served from
-     * {@code system_server} memory and callers are expected to cache it and refresh on a bind
-     * change notification.
+     * <p>Cheap enough to call on every delivery: the answer is cached internally for a short
+     * time, because it only gates an optimisation and bindings change rarely.
      */
     public static boolean isPointActive(@NonNull String pointId) {
         final long now = android.os.SystemClock.elapsedRealtime();
